@@ -151,8 +151,68 @@ ComputedStyle ParseInlineStyle(const std::string& style) {
 
 // ─── selector matching ───────────────────────────────────────────────────────
 
+static bool MatchesSimpleSelector(const CssSelectorPart& part, const Node* node) {
+    if (!node || node->type != NodeType::Element) return false;
+    if (!part.tag.empty() && node->tagName != part.tag) return false;
+    if (!part.id.empty() && node->attr("id") != part.id) return false;
+    if (!part.cls.empty()) {
+        auto ca = node->attr("class");
+        bool found = false;
+        std::istringstream ss(ca);
+        std::string tok;
+        while (ss >> tok) if (tok == part.cls) { found = true; break; }
+        if (!found) return false;
+    }
+    return true;
+}
+
+int CssRule::specificity() const {
+    if (selector.empty()) {
+        return (!id.empty() ? 100 : 0)
+             + (!cls.empty() ?  10 : 0)
+             + (!tag.empty() ?   1 : 0);
+    }
+
+    int total = 0;
+    for (const auto& part : selector) {
+        total += (!part.id.empty() ? 100 : 0)
+               + (!part.cls.empty() ? 10 : 0)
+               + (!part.tag.empty() ? 1 : 0);
+    }
+    return total;
+}
+
 bool CssRule::matches(const Node* node) const {
-    if (node->type != NodeType::Element) return false;
+    if (!node || node->type != NodeType::Element) return false;
+    if (!selector.empty()) {
+        int i = (int)selector.size() - 1;
+        const Node* current = node;
+        if (!MatchesSimpleSelector(selector[i], current)) return false;
+
+        for (; i > 0; --i) {
+            char combinator = selector[i].combinator;
+            const CssSelectorPart& wanted = selector[i - 1];
+
+            if (combinator == '>') {
+                current = current->parent;
+                if (!MatchesSimpleSelector(wanted, current)) return false;
+            } else {
+                const Node* ancestor = current->parent;
+                bool found = false;
+                while (ancestor) {
+                    if (MatchesSimpleSelector(wanted, ancestor)) {
+                        current = ancestor;
+                        found = true;
+                        break;
+                    }
+                    ancestor = ancestor->parent;
+                }
+                if (!found) return false;
+            }
+        }
+        return true;
+    }
+
     if (!tag.empty() && node->tagName != tag) return false;
     if (!id.empty()  && node->attr("id") != id) return false;
     if (!cls.empty()) {
@@ -206,15 +266,15 @@ static std::string stripComments(const std::string& css) {
 }
 
 // Parse one simple selector like "div", ".foo", "#bar", "div.foo", "a#id"
-static CssRule parseSimpleSelector(const std::string& sel) {
-    CssRule rule;
+static CssSelectorPart parseSimpleSelectorPart(const std::string& sel) {
+    CssSelectorPart part;
     std::string cur;
     char mode = 't'; // t=tag, c=class, i=id
     auto flush = [&]() {
         if (cur.empty()) return;
-        if (mode == 't') rule.tag = sLower(cur);
-        if (mode == 'c') rule.cls = cur;
-        if (mode == 'i') rule.id  = cur;
+        if (mode == 't') part.tag = sLower(cur);
+        if (mode == 'c') part.cls = cur;
+        if (mode == 'i') part.id  = cur;
         cur.clear();
     };
     for (char c : sel) {
@@ -225,7 +285,44 @@ static CssRule parseSimpleSelector(const std::string& sel) {
     }
     flush();
     // "*" or empty tag = universal
-    if (rule.tag == "*") rule.tag.clear();
+    if (part.tag == "*") part.tag.clear();
+    return part;
+}
+
+static std::vector<CssSelectorPart> parseSelectorChain(std::string selector) {
+    std::string spaced;
+    spaced.reserve(selector.size() + 4);
+    for (char c : selector) {
+        if (c == '>') spaced += " > ";
+        else spaced += c;
+    }
+
+    std::vector<CssSelectorPart> parts;
+    std::istringstream ss(spaced);
+    std::string tok;
+    char nextCombinator = 0;
+    while (ss >> tok) {
+        if (tok == ">") {
+            nextCombinator = '>';
+            continue;
+        }
+        CssSelectorPart part = parseSimpleSelectorPart(tok);
+        part.combinator = parts.empty() ? 0 : (nextCombinator ? nextCombinator : ' ');
+        parts.push_back(part);
+        nextCombinator = ' ';
+    }
+    return parts;
+}
+
+static CssRule parseSelector(const std::string& sel) {
+    CssRule rule;
+    rule.selector = parseSelectorChain(sel);
+    if (!rule.selector.empty()) {
+        const auto& last = rule.selector.back();
+        rule.tag = last.tag;
+        rule.cls = last.cls;
+        rule.id = last.id;
+    }
     return rule;
 }
 
@@ -265,15 +362,7 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
             selPart = sTrim(selPart);
             if (selPart.empty()) continue;
 
-            // For compound/descendant selectors, just use the LAST simple selector
-            // e.g. "nav > a" → we match "a"
-            //      "div p"   → we match "p"
-            std::string last;
-            std::istringstream ws(selPart);
-            std::string tok;
-            while (ws >> tok) last = tok;
-
-            CssRule rule = parseSimpleSelector(last);
+            CssRule rule = parseSelector(selPart);
             rule.style = declStyle;
             sheet.rules.push_back(rule);
         }

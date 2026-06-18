@@ -4,17 +4,21 @@
 #include <vector>
 #include <string>
 
+struct CssSelectorPart {
+    std::string tag;       // "" = any
+    std::string cls;       // "" = any
+    std::string id;        // "" = any
+    char combinator = 0;   // 0 = first part, ' ' = descendant, '>' = child
+};
+
 struct CssRule {
     std::string tag;       // "" = any
     std::string cls;       // "" = any  (matches class attribute)
     std::string id;        // "" = any
+    std::vector<CssSelectorPart> selector;
     ComputedStyle style;
 
-    int specificity() const {
-        return (!id.empty() ? 100 : 0)
-             + (!cls.empty() ?  10 : 0)
-             + (!tag.empty() ?   1 : 0);
-    }
+    int specificity() const;
 
     bool matches(const Node* node) const;
 };
