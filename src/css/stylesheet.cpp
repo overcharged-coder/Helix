@@ -15,6 +15,14 @@ static std::string sTrim(std::string s) {
     while (!s.empty() && std::isspace((unsigned char)s.back()))  s.pop_back();
     return s;
 }
+static std::string stripQuotes(std::string s) {
+    s = sTrim(s);
+    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"')
+                       || (s.front() == '\'' && s.back() == '\''))) {
+        return s.substr(1, s.size() - 2);
+    }
+    return s;
+}
 
 // ─── color parsing ───────────────────────────────────────────────────────────
 
@@ -155,6 +163,11 @@ static bool MatchesSimpleSelector(const CssSelectorPart& part, const Node* node)
     if (!node || node->type != NodeType::Element) return false;
     if (!part.tag.empty() && node->tagName != part.tag) return false;
     if (!part.id.empty() && node->attr("id") != part.id) return false;
+    if (!part.attrName.empty()) {
+        std::string value = node->attr(part.attrName);
+        if (value.empty() && node->attrs.find(part.attrName) == node->attrs.end()) return false;
+        if (part.attrHasValue && value != part.attrValue) return false;
+    }
     if (!part.cls.empty()) {
         auto ca = node->attr("class");
         bool found = false;
@@ -177,6 +190,7 @@ int CssRule::specificity() const {
     for (const auto& part : selector) {
         total += (!part.id.empty() ? 100 : 0)
                + (!part.cls.empty() ? 10 : 0)
+               + (!part.attrName.empty() ? 10 : 0)
                + (!part.tag.empty() ? 1 : 0);
     }
     return total;
@@ -277,10 +291,27 @@ static CssSelectorPart parseSimpleSelectorPart(const std::string& sel) {
         if (mode == 'i') part.id  = cur;
         cur.clear();
     };
-    for (char c : sel) {
+    for (size_t i = 0; i < sel.size(); ++i) {
+        char c = sel[i];
         if (c == '.') { flush(); mode = 'c'; }
         else if (c == '#') { flush(); mode = 'i'; }
-        else if (c == ':' || c == '[') break; // skip pseudo-classes/attrs
+        else if (c == '[') {
+            flush();
+            size_t end = sel.find(']', i + 1);
+            if (end == std::string::npos) break;
+            std::string body = sTrim(sel.substr(i + 1, end - i - 1));
+            size_t eq = body.find('=');
+            if (eq == std::string::npos) {
+                part.attrName = sLower(body);
+                part.attrHasValue = false;
+            } else {
+                part.attrName = sLower(sTrim(body.substr(0, eq)));
+                part.attrValue = stripQuotes(body.substr(eq + 1));
+                part.attrHasValue = true;
+            }
+            i = end;
+        }
+        else if (c == ':') break; // skip pseudo-classes
         else cur += c;
     }
     flush();

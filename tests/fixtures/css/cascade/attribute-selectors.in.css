@@ -1,0 +1,2 @@
+p[data-state] { color: red; }
+p[data-state=ready] { font-weight: bold; }

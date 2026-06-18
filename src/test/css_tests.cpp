@@ -58,5 +58,20 @@ TestResult RunCssTests() {
         ExpectEqual("css/cascade/ancestor-combinators", actual, expected, result);
     }
 
+    {
+        auto html = ReadTextFile(root / "tests/fixtures/css/cascade/attribute-selectors.in.html");
+        auto css = ReadTextFile(root / "tests/fixtures/css/cascade/attribute-selectors.in.css");
+        auto expected = ReadTextFile(root / "tests/fixtures/css/cascade/attribute-selectors.expected.txt");
+        auto dom = ParseHtml(html);
+        auto sheet = ParseStylesheet(css);
+        std::string actual;
+        for (const std::string id : { "ready", "busy", "div-ready", "missing" }) {
+            auto* node = FindElementById(dom.get(), id);
+            actual += id + ": ";
+            actual += node ? SerializeComputedStyle(sheet.resolve(node)) : "missing\n";
+        }
+        ExpectEqual("css/cascade/attribute-selectors", actual, expected, result);
+    }
+
     return result;
 }

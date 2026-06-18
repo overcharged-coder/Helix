@@ -1,0 +1,4 @@
+ready: color=1,0,0,1 bold=true 
+busy: color=1,0,0,1 
+div-ready: 
+missing: 
