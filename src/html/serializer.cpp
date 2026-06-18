@@ -6,7 +6,9 @@
 static std::string EscapeSnapshotText(const std::string& input) {
     std::string out;
     for (char c : input) {
-        if (c == '\n') out += "\\n";
+        if (c == '\\') out += "\\\\";
+        else if (c == '"') out += "\\\"";
+        else if (c == '\n') out += "\\n";
         else if (c == '\r') out += "\\r";
         else if (c == '\t') out += "\\t";
         else out += c;

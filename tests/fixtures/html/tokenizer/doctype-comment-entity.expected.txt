@@ -1,0 +1,6 @@
+Doctype
+StartTag name=p attr.title="Fish &amp; Chips"
+Text data="Hi"
+EndTag name=p
+Text data="\n"
+EOF

@@ -15,23 +15,33 @@ static std::vector<HtmlToken> TokenizeForTest(const std::string& html) {
     return tokens;
 }
 
+static void RunTokenizerFixture(const std::string& name, TestResult& result) {
+    auto root = FindRepoRoot();
+    auto input = ReadTextFile(root / ("tests/fixtures/html/tokenizer/" + name + ".in.html"));
+    auto expected = ReadTextFile(root / ("tests/fixtures/html/tokenizer/" + name + ".expected.txt"));
+    auto actual = SerializeTokens(TokenizeForTest(input));
+    ExpectEqual("html/tokenizer/" + name, actual, expected, result);
+}
+
+static void RunDomFixture(const std::string& name, TestResult& result) {
+    auto root = FindRepoRoot();
+    auto input = ReadTextFile(root / ("tests/fixtures/html/dom/" + name + ".in.html"));
+    auto expected = ReadTextFile(root / ("tests/fixtures/html/dom/" + name + ".expected.txt"));
+    auto actual = SerializeDom(ParseHtml(input));
+    ExpectEqual("html/dom/" + name, actual, expected, result);
+}
+
 TestResult RunHtmlTests() {
     TestResult result;
-    auto root = FindRepoRoot();
 
-    {
-        auto input = ReadTextFile(root / "tests/fixtures/html/tokenizer/basic.in.html");
-        auto expected = ReadTextFile(root / "tests/fixtures/html/tokenizer/basic.expected.txt");
-        auto actual = SerializeTokens(TokenizeForTest(input));
-        ExpectEqual("html/tokenizer/basic", actual, expected, result);
-    }
+    RunTokenizerFixture("basic", result);
+    RunTokenizerFixture("doctype-comment-entity", result);
+    RunTokenizerFixture("rawtext", result);
+    RunTokenizerFixture("invalid-numeric-entity", result);
 
-    {
-        auto input = ReadTextFile(root / "tests/fixtures/html/dom/basic.in.html");
-        auto expected = ReadTextFile(root / "tests/fixtures/html/dom/basic.expected.txt");
-        auto actual = SerializeDom(ParseHtml(input));
-        ExpectEqual("html/dom/basic", actual, expected, result);
-    }
+    RunDomFixture("basic", result);
+    RunDomFixture("rawtext-style", result);
+    RunDomFixture("autoclose-paragraphs", result);
 
     return result;
 }

@@ -1,5 +1,6 @@
 #include "html/tokenizer.h"
 #include <cctype>
+#include <stdexcept>
 #include <set>
 
 static std::string toLower(std::string s) {
@@ -52,14 +53,33 @@ std::string HtmlTokenizer::decodeEntities(const std::string& raw) {
         else if (ent == "nbsp") { out += ' ';  i = semi + 1; }
         else if (!ent.empty() && ent[0] == '#') {
             unsigned long cp = 0;
-            if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X'))
-                cp = std::stoul(ent.substr(2), nullptr, 16);
-            else
-                cp = std::stoul(ent.substr(1));
+            try {
+                size_t consumed = 0;
+                if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X'))
+                    cp = std::stoul(ent.substr(2), &consumed, 16);
+                else
+                    cp = std::stoul(ent.substr(1), &consumed, 10);
+
+                size_t expected = (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X'))
+                    ? ent.size() - 2
+                    : ent.size() - 1;
+                if (consumed != expected || cp == 0 || cp > 0x10FFFF)
+                    throw std::invalid_argument("invalid numeric entity");
+            } catch (...) {
+                out += raw.substr(i, semi - i + 1);
+                i = semi + 1;
+                continue;
+            }
             // Encode as UTF-8
             if (cp < 0x80)       out += (char)cp;
             else if (cp < 0x800) { out += (char)(0xC0|(cp>>6)); out += (char)(0x80|(cp&0x3F)); }
-            else { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+            else if (cp < 0x10000) { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+            else {
+                out += (char)(0xF0|(cp>>18));
+                out += (char)(0x80|((cp>>12)&0x3F));
+                out += (char)(0x80|((cp>>6)&0x3F));
+                out += (char)(0x80|(cp&0x3F));
+            }
             i = semi + 1;
         } else { out += raw[i++]; }
     }
@@ -108,7 +128,7 @@ void HtmlTokenizer::tokenize(const std::string& html, Callback cb) {
     m_src = &html;
     m_pos = 0;
 
-    // Tags whose content we skip entirely
+    // Tags whose content is raw text until the matching end tag.
     static const std::set<std::string> rawTags = { "script", "style", "noscript" };
 
     while (m_pos < m_src->size()) {
@@ -135,7 +155,7 @@ void HtmlTokenizer::tokenize(const std::string& html, Callback cb) {
             continue;
         }
         // DOCTYPE
-        if (toLower(m_src->substr(m_pos, 7)) == "doctype") {
+        if (toLower(m_src->substr(m_pos, 8)) == "!doctype") {
             skipUntil(">");
             if (m_pos < m_src->size()) consume();
             HtmlToken t; t.type = TokenType::Doctype; cb(t);
@@ -175,9 +195,16 @@ void HtmlTokenizer::tokenize(const std::string& html, Callback cb) {
         t.selfClosing = selfClose;
         cb(t);
 
-        // Skip raw-content tags
+        // Preserve raw-content text without entity decoding or treating '<' as tags.
         if (!isEnd && rawTags.count(tagName)) {
+            size_t rawStart = m_pos;
             skipUntil("</" + tagName);
+            if (m_pos > rawStart) {
+                HtmlToken rawText;
+                rawText.type = TokenType::Text;
+                rawText.data = m_src->substr(rawStart, m_pos - rawStart);
+                cb(rawText);
+            }
         }
     }
 
