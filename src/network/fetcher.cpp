@@ -7,7 +7,7 @@ FetchResult FetchUrl(const std::string& url) {
     FetchResult r;
 
     HINTERNET hNet = InternetOpenA(
-        "Felix/0.1",
+        "Helix/0.1",
         INTERNET_OPEN_TYPE_PRECONFIG,
         nullptr, nullptr, 0);
     if (!hNet) { r.error = "InternetOpen failed"; return r; }

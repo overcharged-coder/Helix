@@ -11,13 +11,14 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <algorithm>
 
 // ─── control IDs ─────────────────────────────────────────────────────────────
 enum : int { IDC_BACK = 101, IDC_FWRD, IDC_REFR, IDC_STOP, IDC_HOME, IDC_URL };
 
 // ─── custom window messages ───────────────────────────────────────────────────
-constexpr UINT WM_PAGE_READY  = WM_USER + 1;  // lParam = Page*
-constexpr UINT WM_IMAGE_READY = WM_USER + 2;  // lParam = ImageMsg*
+constexpr UINT WM_PAGE_READY  = WM_USER + 1;
+constexpr UINT WM_IMAGE_READY = WM_USER + 2;
 
 // ─── data types ──────────────────────────────────────────────────────────────
 struct Page {
@@ -75,7 +76,7 @@ static void SetStatus(const std::string& s) {
     SetWindowTextW(g_hwndStatus, ToWide(s).c_str());
 }
 static void SetTitle(const std::wstring& t) {
-    SetWindowTextW(g_hwnd, (t + L" — Felix").c_str());
+    SetWindowTextW(g_hwnd, (t + L" — Helix").c_str());
 }
 
 // ─── scrollbar ───────────────────────────────────────────────────────────────
@@ -100,21 +101,24 @@ static void ClampScroll() {
 // ─── built-in home page ───────────────────────────────────────────────────────
 static const std::string kHomeHtml = R"html(<!DOCTYPE html>
 <html>
-<head><title>Felix</title></head>
+<head><title>Helix</title></head>
 <body>
-<h1>Felix</h1>
+<h1>Helix</h1>
 <p>Your browser. Type a URL above and press <strong>Enter</strong>.</p>
 <hr>
 <h3>Keyboard shortcuts</h3>
-<p><strong>Ctrl+L</strong> — focus address bar</p>
-<p><strong>F5 / Ctrl+R</strong> — reload</p>
-<p><strong>Alt+Left / Alt+Right</strong> — back / forward</p>
-<p><strong>Escape</strong> — stop loading</p>
+<p><strong>Ctrl+L</strong> &mdash; focus address bar</p>
+<p><strong>F5 / Ctrl+R</strong> &mdash; reload</p>
+<p><strong>Alt+Left / Alt+Right</strong> &mdash; back / forward</p>
+<p><strong>Ctrl+H</strong> &mdash; history</p>
+<p><strong>Ctrl+= / Ctrl+-</strong> &mdash; zoom in / out</p>
+<p><strong>Ctrl+0</strong> &mdash; reset zoom</p>
+<p><strong>Escape</strong> &mdash; stop loading</p>
 <hr>
 <h3>About</h3>
-<p>Felix is a hand-built C++ browser. It has its own HTML tokenizer,
-DOM builder, layout engine, Direct2D renderer, and CSS color parser.
-No Chromium. No WebView. Everything is yours.</p>
+<p>Helix is a hand-built C++ browser. It has its own HTML tokenizer,
+DOM builder, CSS cascade engine, layout engine, Direct2D renderer, and
+image loader. No Chromium. No WebView. Everything is yours.</p>
 </body>
 </html>)html";
 
@@ -133,15 +137,39 @@ static void Navigate(const std::string& rawUrl, bool pushHistory) {
 
     std::string url = rawUrl;
 
-    // ── built-in pages ──────────────────────────────────────────────────
-    if (url.empty() || url == "felix://home" || url == "felix:home") {
-        url = "felix://home";
-        auto* p  = new Page{ url, ParseHtml(kHomeHtml), {} };
+    // ── built-in: home ─────────────────────────────────────────────────────
+    if (url.empty() || url == "felix://home" || url == "helix://home") {
+        url = "helix://home";
+        auto* p = new Page{ url, ParseHtml(kHomeHtml), {} };
         g_page.reset(p);
         g_scrollY = 0.f;
         if (pushHistory) PushHistory(url);
         SetUrlBar(url);
-        SetWindowTextW(g_hwnd, L"Felix");
+        SetWindowTextW(g_hwnd, L"Helix");
+        UpdateScrollbar();
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    // ── built-in: history ──────────────────────────────────────────────────
+    if (url == "felix://history" || url == "helix://history") {
+        url = "helix://history";
+        std::string html = "<html><body><h1>History</h1>";
+        bool any = false;
+        for (int i = (int)g_history.size() - 1; i >= 0; i--) {
+            const auto& h = g_history[i];
+            if (h == "helix://history" || h == "felix://history") continue;
+            html += "<p><a href=\"" + h + "\">" + h + "</a></p>";
+            any = true;
+        }
+        if (!any) html += "<p>No history yet.</p>";
+        html += "</body></html>";
+        auto* p = new Page{ url, ParseHtml(html), {} };
+        g_page.reset(p);
+        g_scrollY = 0.f;
+        if (pushHistory) PushHistory(url);
+        SetUrlBar(url);
+        SetTitle(L"History");
         UpdateScrollbar();
         InvalidateRect(g_hwnd, NULL, FALSE);
         return;
@@ -154,18 +182,17 @@ static void Navigate(const std::string& rawUrl, bool pushHistory) {
     EnableWindow(g_hwndStop, TRUE);
     EnableWindow(g_hwndRefr, FALSE);
     SetUrlBar(url);
-    SetWindowTextW(g_hwnd, L"Loading… — Felix");
+    SetWindowTextW(g_hwnd, L"Loading… — Helix");
 
     if (pushHistory) PushHistory(url);
 
     HWND hwnd = g_hwnd;
     std::thread([hwnd, url]() {
-        auto* p  = new Page;
-        p->url   = url;
+        auto* p = new Page;
+        p->url  = url;
         auto res = FetchUrl(url);
         if (res.success) {
             p->dom = ParseHtml(res.body);
-            // Use final URL after redirects if different
             if (!res.finalUrl.empty() && res.finalUrl != url)
                 p->url = res.finalUrl;
         } else {
@@ -188,11 +215,11 @@ static void LayoutControls() {
     int w = rc.right, h = rc.bottom;
     int y = (TOOLBAR_H - BTN_H) / 2;
     int x = MARGIN;
-    SetWindowPos(g_hwndBack, NULL, x,                  y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndFwrd, NULL, x + BTN_W,          y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndRefr, NULL, x + BTN_W * 2,      y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndStop, NULL, x + BTN_W * 3,      y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndHome, NULL, x + BTN_W * 4,      y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(g_hwndBack, NULL, x,               y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(g_hwndFwrd, NULL, x + BTN_W,       y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(g_hwndRefr, NULL, x + BTN_W * 2,   y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(g_hwndStop, NULL, x + BTN_W * 3,   y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(g_hwndHome, NULL, x + BTN_W * 4,   y, BTN_W, BTN_H, SWP_NOZORDER);
     int urlX = x + BTN_W * 5 + MARGIN;
     SetWindowPos(g_hwndUrl,    NULL, urlX, y, w - urlX - MARGIN, BTN_H, SWP_NOZORDER);
     SetWindowPos(g_hwndStatus, NULL, 0, h - STATUS_H, w, STATUS_H, SWP_NOZORDER);
@@ -223,11 +250,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return CreateWindowW(L"BUTTON", t, WS_CHILD | WS_VISIBLE,
                 0,0,0,0, hwnd, (HMENU)(intptr_t)id, hi, NULL);
         };
-        g_hwndBack = btn(L"←", IDC_BACK);  // ←
-        g_hwndFwrd = btn(L"→", IDC_FWRD);  // →
-        g_hwndRefr = btn(L"↻", IDC_REFR);  // ↻
-        g_hwndStop = btn(L"✕", IDC_STOP);  // ✕
-        g_hwndHome = btn(L"⌂", IDC_HOME);  // ⌂
+        g_hwndBack = btn(L"←", IDC_BACK);
+        g_hwndFwrd = btn(L"→", IDC_FWRD);
+        g_hwndRefr = btn(L"↻", IDC_REFR);
+        g_hwndStop = btn(L"✕", IDC_STOP);
+        g_hwndHome = btn(L"⌂", IDC_HOME);
 
         g_hwndUrl = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
@@ -240,7 +267,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(g_hwndStop, FALSE);
         SetWindowSubclass(g_hwndUrl, UrlProc, 1, 0);
 
-        // Wire up image loading
         g_renderer.SetImageRequestCallback([hwnd](std::string url) {
             std::thread([hwnd, url]() {
                 auto res = FetchUrl(url);
@@ -254,7 +280,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         });
 
         g_renderer.Init(hwnd);
-        Navigate("felix://home");
+        Navigate("helix://home");
         return 0;
     }
 
@@ -294,7 +320,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else {
             std::string html = "<html><body><h2>Error</h2><p>" + p->error + "</p></body></html>";
             g_page->dom = ParseHtml(html);
-            SetWindowTextW(hwnd, L"Error — Felix");
+            SetWindowTextW(hwnd, L"Error — Helix");
         }
         ClampScroll();
         UpdateScrollbar();
@@ -314,10 +340,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SCROLLINFO si = { sizeof(si), SIF_ALL };
         GetScrollInfo(hwnd, SB_VERT, &si);
         switch (LOWORD(wp)) {
-        case SB_LINEUP:     g_scrollY -= 30.f;               break;
-        case SB_LINEDOWN:   g_scrollY += 30.f;               break;
-        case SB_PAGEUP:     g_scrollY -= (float)si.nPage;    break;
-        case SB_PAGEDOWN:   g_scrollY += (float)si.nPage;    break;
+        case SB_LINEUP:     g_scrollY -= 30.f;                break;
+        case SB_LINEDOWN:   g_scrollY += 30.f;                break;
+        case SB_PAGEUP:     g_scrollY -= (float)si.nPage;     break;
+        case SB_PAGEDOWN:   g_scrollY += (float)si.nPage;     break;
         case SB_THUMBTRACK: g_scrollY  = (float)si.nTrackPos; break;
         }
         ClampScroll();
@@ -337,7 +363,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         int px = (int)(short)LOWORD(lp);
         int py = (int)(short)HIWORD(lp);
-        if (py > TOOLBAR_H && py < HIWORD(lp) - STATUS_H) {
+        if (py > TOOLBAR_H) {
             std::string href = g_renderer.HitTest((float)px, (float)py);
             SetCursor(href.empty() ? g_cursorArrow : g_cursorHand);
             SetStatus(href);
@@ -361,7 +387,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDC_BACK: GoBack();    break;
         case IDC_FWRD: GoForward(); break;
-        case IDC_HOME: Navigate("felix://home"); break;
+        case IDC_HOME: Navigate("helix://home"); break;
         case IDC_REFR:
             if (g_page) Navigate(g_page->url, false);
             break;
@@ -388,17 +414,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    WNDCLASSEXW wc  = { sizeof(wc) };
-    wc.lpfnWndProc  = WndProc;
-    wc.hInstance    = hInst;
-    wc.lpszClassName = L"FelixBrowser";
-    wc.hCursor      = LoadCursor(NULL, IDC_ARROW);
+    WNDCLASSEXW wc   = { sizeof(wc) };
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = L"HelixBrowser";
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.hIcon        = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
     g_hwnd = CreateWindowExW(0,
-        L"FelixBrowser", L"Felix",
+        L"HelixBrowser", L"Helix",
         WS_OVERLAPPEDWINDOW | WS_VSCROLL,
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 860,
         NULL, NULL, hInst, NULL);
@@ -429,6 +455,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 g_loading = false;
                 EnableWindow(g_hwndStop, FALSE);
                 EnableWindow(g_hwndRefr, TRUE);
+                handled = true;
+            } else if (ctrl && msg.wParam == 'H') {
+                Navigate("helix://history");
+                handled = true;
+            } else if (ctrl && (msg.wParam == VK_OEM_PLUS || msg.wParam == '=')) {
+                g_renderer.SetZoom(g_renderer.GetZoom() + 0.1f);
+                InvalidateRect(g_hwnd, NULL, FALSE);
+                handled = true;
+            } else if (ctrl && msg.wParam == VK_OEM_MINUS) {
+                g_renderer.SetZoom(g_renderer.GetZoom() - 0.1f);
+                InvalidateRect(g_hwnd, NULL, FALSE);
+                handled = true;
+            } else if (ctrl && msg.wParam == '0') {
+                g_renderer.SetZoom(1.f);
+                InvalidateRect(g_hwnd, NULL, FALSE);
                 handled = true;
             }
 

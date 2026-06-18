@@ -1,5 +1,6 @@
 #pragma once
 #include "html/dom.h"
+#include "css/stylesheet.h"
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -15,14 +16,6 @@ struct HitRegion {
     std::string href;
 };
 
-// Parsed CSS color value
-struct CssColor {
-    bool  valid = false;
-    float r = 0, g = 0, b = 0, a = 1;
-    D2D1_COLOR_F toD2D() const { return { r, g, b, a }; }
-};
-CssColor ParseCssColor(const std::string& s);
-
 class Renderer {
 public:
     ~Renderer();
@@ -30,8 +23,7 @@ public:
     bool Init(HWND hwnd);
     void Resize(UINT width, UINT height);
 
-    // Paint the document. topInset = toolbar height so content
-    // starts below the toolbar. Returns total document height.
+    // Returns total document height.
     float Paint(const std::shared_ptr<Node>& doc,
                 float scrollY,
                 const std::string& baseUrl,
@@ -40,13 +32,14 @@ public:
     std::string HitTest(float x, float y) const;
     void DiscardTarget();
 
-    // Called on the UI thread when image bytes have arrived.
     void ReceiveImage(const std::string& url, const std::vector<uint8_t>& bytes);
 
-    // main.cpp sets this to kick off async image fetches.
     void SetImageRequestCallback(std::function<void(std::string)> cb) {
         m_imageRequestCb = std::move(cb);
     }
+
+    void  SetZoom(float z);
+    float GetZoom() const { return m_zoom; }
 
 private:
     ID2D1Factory*           m_factory   = nullptr;
@@ -61,18 +54,21 @@ private:
 
     IDWriteTextFormat*      m_fmtBody   = nullptr;
     IDWriteTextFormat*      m_fmtBold   = nullptr;
+    IDWriteTextFormat*      m_fmtItalic = nullptr;
     IDWriteTextFormat*      m_fmtCode   = nullptr;
     IDWriteTextFormat*      m_fmtH1     = nullptr;
     IDWriteTextFormat*      m_fmtH2     = nullptr;
     IDWriteTextFormat*      m_fmtH3     = nullptr;
 
-    // Image cache — device-dependent, cleared on target loss
+    float m_zoom = 1.f;
+
     std::map<std::string, ID2D1Bitmap*> m_images;
     std::set<std::string>               m_loadingImages;
     std::function<void(std::string)>    m_imageRequestCb;
 
-    // Per-Paint temporary brushes (CSS color overrides); released after Paint
+    // Per-Paint temporary resources; released at end of Paint
     std::vector<ID2D1SolidColorBrush*>  m_tempBrushes;
+    std::vector<IDWriteTextFormat*>     m_tempFormats;
 
     HWND  m_hwnd   = nullptr;
     UINT  m_width  = 800;
@@ -84,6 +80,7 @@ private:
     void ReleaseTarget();
     void ReleaseBrushes();
     bool CreateBrushes();
+    void RecreateFormats();
 
     struct PaintCtx {
         float y            = 0;
@@ -92,13 +89,15 @@ private:
         float winH         = 600;
         float topInset     = 0;
         bool  bold         = false;
+        bool  italic       = false;
         bool  isLink       = false;
         bool  isCode       = false;
         std::string linkHref;
         int   headingLevel = 0;
         std::string baseUrl;
-        // nullptr = use default brush
         ID2D1SolidColorBrush* colorOverride = nullptr;
+        IDWriteTextFormat*    fmtOverride   = nullptr;
+        const Stylesheet*     sheet         = nullptr;
     };
 
     float WalkNode(const Node* node, PaintCtx& ctx);
@@ -113,9 +112,11 @@ private:
                           float scrollY,
                           float topInset);
 
-    // Creates a temporary brush for the current Paint call
     ID2D1SolidColorBrush* TempBrush(D2D1_COLOR_F color);
+    IDWriteTextFormat*    TempFormat(float size, bool bold, bool mono, bool italic);
 
     std::wstring ToWide(const std::string& s);
     std::string  ResolveUrl(const std::string& href, const std::string& base);
+
+    static Stylesheet CollectStylesheet(const Node* root);
 };
