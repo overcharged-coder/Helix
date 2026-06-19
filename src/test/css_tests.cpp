@@ -167,5 +167,33 @@ TestResult RunCssTests() {
             result);
     }
 
+    {
+        auto dom = ParseHtml("<html><body><div id=\"band\"></div></body></html>");
+        auto sheet = ParseStylesheet("#band { height: 8px; min-height: 1em; max-height: 2mm; }");
+        auto* node = FindElementById(dom.get(), "band");
+        std::string actual = node ? SerializeComputedStyle(sheet.resolve(node)) : "missing\n";
+        ExpectEqual("css/cascade/min-max-height",
+            actual,
+            "height=8 minHeight=16 maxHeight=7.55906 \n",
+            result);
+    }
+
+    {
+        auto dom = ParseHtml("<html><body><div id=\"nose\"></div></body></html>");
+        auto* owner = FindElementById(dom.get(), "nose");
+        auto pseudo = Node::makeElement("div");
+        pseudo->attrs = owner->attrs;
+        pseudo->attrs["_helix_pseudo"] = "before";
+        pseudo->parent = const_cast<Node*>(owner);
+        auto sheet = ParseStylesheet(
+            "#nose:before { display: block; border-style: none solid solid; "
+            "border-color: red yellow black yellow; border-width: 1em; content: ''; height: 0; }");
+        std::string actual = SerializeComputedStyle(sheet.resolve(pseudo.get()));
+        ExpectEqual("css/cascade/generated-border-box",
+            actual,
+            "display=block borderWidth=16 borderTopWidth=0 borderTopColor=1,0,0,1 borderRightColor=1,1,0,1 borderBottomColor=0,0,0,1 borderLeftColor=1,1,0,1 height=0 content= \n",
+            result);
+    }
+
     return result;
 }

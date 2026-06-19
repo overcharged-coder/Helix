@@ -31,7 +31,7 @@ static std::string utf8(unsigned long cp) {
 
 static const std::map<std::string, unsigned long>& namedEntities() {
     static const std::map<std::string, unsigned long> entities = {
-        {"amp", 38}, {"lt", 60}, {"gt", 62}, {"quot", 34}, {"apos", 39}, {"nbsp", 32},
+        {"amp", 38}, {"lt", 60}, {"gt", 62}, {"quot", 34}, {"apos", 39}, {"nbsp", 0x00A0},
         {"mdash", 0x2014}, {"ndash", 0x2013}, {"bull", 0x2022}, {"hellip", 0x2026},
         {"raquo", 0x00BB}, {"laquo", 0x00AB},
         {"rsquo", 0x2019}, {"lsquo", 0x2018}, {"rdquo", 0x201D}, {"ldquo", 0x201C},

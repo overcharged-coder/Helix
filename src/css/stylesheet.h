@@ -15,14 +15,15 @@ enum class CssAttrMatch {
 };
 
 struct CssSelectorPart {
-    std::string tag;       // "" = any
-    std::string cls;       // "" = any
-    std::string id;        // "" = any
+    std::string tag;                    // "" = any
+    std::vector<std::string> classes;  // all must match
+    std::string id;                    // "" = any
     std::string attrName;  // "" = no attribute selector
     std::string attrValue; // only used when attrHasValue = true
     bool attrHasValue = false;
     CssAttrMatch attrMatch = CssAttrMatch::Exists;
     std::vector<std::string> pseudos;
+    std::string pseudoElement;  // "before" or "after" for generated content
     bool neverMatch = false;
     char combinator = 0;   // 0 = first part, ' ' = descendant, '>' = child, '+' = adjacent sibling
 };

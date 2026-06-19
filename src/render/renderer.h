@@ -143,7 +143,9 @@ private:
         IDWriteTextFormat*    fmtOverride   = nullptr;
         const Stylesheet*     sheet         = nullptr;
         float lineHeightMul = 1.45f;
+        int   floatMode         = 0;      // parent's effective float mode for inherit
         float floatBottom       = 0.f;
+        float lastMarginBot     = 0.f;    // previous sibling's bottom margin (for collapsing)
         float containingBlockX  = 32.f;   // content-left of nearest positioned ancestor
         float containingBlockY  = 0.f;    // content-top  of nearest positioned ancestor
         float containingBlockW  = 700.f;  // content-width of nearest positioned ancestor

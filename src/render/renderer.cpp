@@ -43,6 +43,35 @@ static bool LooksLikeImageUrl(const std::string& url) {
         || low.find(".bmp") != std::string::npos;
 }
 
+static bool IsBreakableWhitespace(wchar_t c) {
+    return c != 0x00A0 && iswspace(c);
+}
+
+static float EstimateExplicitOuterWidth(const Node* node, const Stylesheet* sheet, float zoom) {
+    if (!node || node->type != NodeType::Element || !sheet) return -1.f;
+    auto cs = sheet->resolve(node);
+
+    float width = cs.width >= 0 ? cs.width * zoom : -1.f;
+    float maxChild = 0.f;
+    for (const auto& child : node->children) {
+        if (child->type != NodeType::Element) continue;
+        float childW = EstimateExplicitOuterWidth(child.get(), sheet, zoom);
+        if (childW > maxChild) maxChild = childW;
+    }
+    if (width < 0 && maxChild <= 0) return -1.f;
+    if (width < 0) width = maxChild;
+
+    float mLeft = cs.marginLeftSet() && !cs.isMarginAuto(cs.marginLeft) ? cs.marginLeft * zoom : 0.f;
+    float mRight = cs.marginRightSet() && !cs.isMarginAuto(cs.marginRight) ? cs.marginRight * zoom : 0.f;
+    float pLeft = cs.paddingLeft >= 0 ? cs.paddingLeft * zoom : 0.f;
+    float pRight = cs.paddingRight >= 0 ? cs.paddingRight * zoom : 0.f;
+    float bwL = cs.borderLeftWidth  >= 0 ? cs.borderLeftWidth  * zoom
+              : cs.borderWidth    >= 0 ? cs.borderWidth      * zoom : 0.f;
+    float bwR = cs.borderRightWidth >= 0 ? cs.borderRightWidth * zoom
+              : cs.borderWidth    >= 0 ? cs.borderWidth      * zoom : 0.f;
+    return width + mLeft + mRight + pLeft + pRight + bwL + bwR;
+}
+
 std::wstring Renderer::ToWide(const std::string& s) {
     if (s.empty()) return {};
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -374,10 +403,10 @@ float Renderer::DrawWrappedText(const std::wstring& text,
     {
         size_t i = 0, n = text.size();
         while (i < n) {
-            while (i < n && iswspace(text[i])) i++;
+            while (i < n && IsBreakableWhitespace(text[i])) i++;
             if (i >= n) break;
             size_t j = i;
-            while (j < n && !iswspace(text[j])) j++;
+            while (j < n && !IsBreakableWhitespace(text[j])) j++;
             std::wstring w = text.substr(i, j - i);
             float ww = 0;
             IDWriteTextLayout* lay = nullptr;
@@ -520,6 +549,25 @@ float Renderer::DrawPreBlock(const Node* node, PaintCtx& ctx) {
 
 // ─── stylesheet helpers ───────────────────────────────────────────────────────
 
+static std::string UrlDecodeSimple(const std::string& s) {
+    std::string out; out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                c |= 0x20;
+                if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+                return 0;
+            };
+            out += (char)(hex(s[i+1]) * 16 + hex(s[i+2]));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
 Stylesheet Renderer::CollectStylesheet(const Node* root) {
     Stylesheet sheet;
     std::function<void(const Node*)> walk = [&](const Node* n) {
@@ -530,6 +578,20 @@ Stylesheet Renderer::CollectStylesheet(const Node* root) {
                 if (c->type == NodeType::Text) css += c->text;
             Stylesheet part = ParseStylesheet(css);
             for (auto& r : part.rules) sheet.rules.push_back(r);
+        } else if (n->type == NodeType::Element && n->tagName == "link") {
+            // Load data:text/css inline stylesheets from <link rel="stylesheet">
+            std::string rel = n->attr("rel");
+            std::string relLow; for (char c : rel) relLow += (char)std::tolower((unsigned char)c);
+            if (relLow.find("stylesheet") != std::string::npos) {
+                std::string href = n->attr("href");
+                std::string hrefLow; for (char c : href) hrefLow += (char)std::tolower((unsigned char)c);
+                const std::string prefix = "data:text/css,";
+                if (hrefLow.rfind(prefix, 0) == 0) {
+                    std::string css = UrlDecodeSimple(href.substr(prefix.size()));
+                    Stylesheet part = ParseStylesheet(css);
+                    for (auto& r : part.rules) sheet.rules.push_back(r);
+                }
+            }
         }
         for (auto& c : n->children) walk(c.get());
     };
@@ -564,19 +626,7 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
     if (node->type == NodeType::Text) {
         if (node->text.empty()) return ctx.y;
 
-        // Normalize: UTF-8 non-breaking space (0xC2 0xA0) → regular space
-        std::string normalized;
-        normalized.reserve(node->text.size());
-        for (size_t i = 0; i < node->text.size(); ) {
-            unsigned char c0 = (unsigned char)node->text[i];
-            if (c0 == 0xC2 && i + 1 < node->text.size() && (unsigned char)node->text[i+1] == 0xA0) {
-                normalized += ' '; i += 2;
-            } else {
-                normalized += node->text[i++];
-            }
-        }
-
-        std::wstring wtext = ToWide(normalized);
+        std::wstring wtext = ToWide(node->text);
 
         // Apply text-transform
         if (ctx.textTransform == 1) {
@@ -586,7 +636,7 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         } else if (ctx.textTransform == 3) {
             bool capNext = true;
             for (auto& c : wtext) {
-                if (iswspace(c)) { capNext = true; }
+                if (IsBreakableWhitespace(c)) { capNext = true; }
                 else if (capNext) { c = (wchar_t)towupper(c); capNext = false; }
             }
         }
@@ -608,12 +658,22 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
     // ── CSS cascade ───────────────────────────────────────────────────────
     ComputedStyle cs;
     if (ctx.sheet) cs = ctx.sheet->resolve(node);
-    if (cs.displayNone) return ctx.y;
+    if (cs.isDisplayNone() || (cs.visibilitySet && cs.visibilityHidden)) {
+        return ctx.y;
+    }
     if (!ctx.dryRun) {
         std::string id = node->attr("id");
-        if (!id.empty() && !m_anchorY.count(id)) m_anchorY[id] = ctx.y;
         std::string name = node->attr("name");
-        if (!name.empty() && !m_anchorY.count(name)) m_anchorY[name] = ctx.y;
+        bool isBlockTag = (tag == "p" || tag == "div" || tag == "section" || tag == "article"
+            || tag == "main" || tag == "header" || tag == "aside" || tag == "footer"
+            || tag == "nav" || tag == "form" || tag == "fieldset" || tag == "details"
+            || tag == "body" || tag == "html" || tag == "blockquote" || tag == "ul" || tag == "ol"
+            || tag == "li" || tag == "table" || tag == "tr" || tag == "tbody" || tag == "thead"
+            || (tag.size() == 2 && tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6'));
+        if (!isBlockTag) {
+            if (!id.empty() && !m_anchorY.count(id)) m_anchorY[id] = ctx.y;
+            if (!name.empty() && !m_anchorY.count(name)) m_anchorY[name] = ctx.y;
+        }
     }
 
     // Save & apply inherited style properties
@@ -650,41 +710,85 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         ctx.lineHeightMul = cs.lineHeight / base;
     }
 
-    auto walkChildren = [&]() {
-        for (auto& c : node->children) WalkNode(c.get(), ctx);
+    const bool isGeneratedPseudo = !node->attr("_helix_pseudo").empty();
+    auto paintGeneratedPseudo = [&](const char* which) {
+        if (isGeneratedPseudo || !ctx.sheet) return;
+        auto pseudo = Node::makeElement(tag);
+        pseudo->attrs = node->attrs;
+        pseudo->attrs["_helix_pseudo"] = which;
+        pseudo->parent = const_cast<Node*>(node);
+        if (!ctx.sheet->resolve(pseudo.get()).contentSet) return;
+        WalkNode(pseudo.get(), ctx);
     };
 
-    // ── inline elements ───────────────────────────────────────────────────
-    if (tag == "a") {
-        bool was = ctx.isLink; std::string wasHref = ctx.linkHref;
-        ctx.isLink   = true;
-        ctx.linkHref = ResolveUrl(node->attr("href"), ctx.baseUrl);
-        walkChildren();
-        ctx.isLink = was; ctx.linkHref = wasHref;
-        goto restore;
-    }
-    if (tag == "strong" || tag == "b") {
-        bool was = ctx.bold; ctx.bold = true;
-        walkChildren();
-        ctx.bold = was;
-        goto restore;
-    }
-    if (tag == "em" || tag == "i" || tag == "cite") {
-        bool was = ctx.italic; ctx.italic = true;
-        walkChildren();
-        ctx.italic = was;
-        goto restore;
-    }
-    if (tag == "code" || tag == "tt" || tag == "kbd" || tag == "samp") {
-        bool was = ctx.isCode; ctx.isCode = true;
-        walkChildren();
-        ctx.isCode = was;
-        goto restore;
-    }
-    if (tag == "span"  || tag == "small" || tag == "abbr" || tag == "time"
-     || tag == "mark"  || tag == "label" || tag == "s"    || tag == "del"
-     || tag == "ins"   || tag == "u"     || tag == "bdi"  || tag == "bdo") {
-        walkChildren(); goto restore;
+    auto walkChildren = [&]() {
+        paintGeneratedPseudo("before");
+        if (cs.positionMode != 2 && cs.positionMode != 3) {
+            for (auto& c : node->children) WalkNode(c.get(), ctx);
+            paintGeneratedPseudo("after");
+            return;
+        }
+
+        // Absolute/fixed containers: paint in 3 layers (CSS2 Appendix E).
+        PaintCtx layerBase = ctx;
+        float maxY = ctx.y;
+        for (int layer = 0; layer < 3; ++layer) {
+            for (auto& child : node->children) {
+                int childLayer = 2;
+                if (child->type == NodeType::Element && ctx.sheet) {
+                    ComputedStyle childStyle = ctx.sheet->resolve(child.get());
+                    if (childStyle.floatMode != 0) {
+                        childLayer = 1;
+                    } else if (childStyle.bgColor.valid || !childStyle.backgroundImage.empty()
+                            || childStyle.borderWidth > 0 || childStyle.borderTopWidth > 0
+                            || childStyle.borderRightWidth > 0 || childStyle.borderBottomWidth > 0
+                            || childStyle.borderLeftWidth > 0 || childStyle.height > 0) {
+                        childLayer = 0;
+                    }
+                }
+                if (childLayer != layer) continue;
+                PaintCtx layerCtx = layerBase;
+                WalkNode(child.get(), layerCtx);
+                maxY = std::max(maxY, layerCtx.y);
+            }
+        }
+        ctx.y = maxY;
+        paintGeneratedPseudo("after");
+    };
+
+    // ── inline elements (skip when display:block forces block layout) ───
+    if (!cs.isDisplayBlock()) {
+        if (tag == "a") {
+            bool was = ctx.isLink; std::string wasHref = ctx.linkHref;
+            ctx.isLink   = true;
+            ctx.linkHref = ResolveUrl(node->attr("href"), ctx.baseUrl);
+            walkChildren();
+            ctx.isLink = was; ctx.linkHref = wasHref;
+            goto restore;
+        }
+        if (tag == "strong" || tag == "b") {
+            bool was = ctx.bold; ctx.bold = true;
+            walkChildren();
+            ctx.bold = was;
+            goto restore;
+        }
+        if (tag == "em" || tag == "i" || tag == "cite") {
+            bool was = ctx.italic; ctx.italic = true;
+            walkChildren();
+            ctx.italic = was;
+            goto restore;
+        }
+        if (tag == "code" || tag == "tt" || tag == "kbd" || tag == "samp") {
+            bool was = ctx.isCode; ctx.isCode = true;
+            walkChildren();
+            ctx.isCode = was;
+            goto restore;
+        }
+        if (tag == "span"  || tag == "small" || tag == "abbr" || tag == "time"
+         || tag == "mark"  || tag == "label" || tag == "s"    || tag == "del"
+         || tag == "ins"   || tag == "u"     || tag == "bdi"  || tag == "bdo") {
+            walkChildren(); goto restore;
+        }
     }
     if (tag == "br") {
         ctx.y += FormatFor(ctx)->GetFontSize() * ctx.lineHeightMul;
@@ -727,18 +831,67 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
             auto it = m_images.find(data);
             if (it != m_images.end() && it->second) {
                 D2D1_SIZE_F bmpSz = it->second->GetSize();
-                float dw = cs.width >= 0 ? cs.width * m_zoom : bmpSz.width;
-                float dh = cs.height >= 0 ? cs.height * m_zoom : bmpSz.height;
+                bool isInline = cs.isDisplayInline();
+                float dw = (!isInline && cs.width >= 0) ? cs.width * m_zoom : bmpSz.width;
+                float dh = (!isInline && cs.height >= 0) ? cs.height * m_zoom : bmpSz.height;
                 if (dw <= 0) dw = bmpSz.width;
                 if (dh <= 0) dh = bmpSz.height;
+
+                float pTop = cs.paddingTop >= 0 ? cs.paddingTop * m_zoom : 0.f;
+                float pRight = cs.paddingRight >= 0 ? cs.paddingRight * m_zoom : 0.f;
+                float pBottom = cs.paddingBottom >= 0 ? cs.paddingBottom * m_zoom : 0.f;
+                float pLeft = cs.paddingLeft >= 0 ? cs.paddingLeft * m_zoom : 0.f;
+                float bw = cs.borderWidth >= 0 ? cs.borderWidth * m_zoom : 0.f;
+                float bwTop = cs.borderTopWidth >= 0 ? cs.borderTopWidth * m_zoom : bw;
+                float bwRight = cs.borderRightWidth >= 0 ? cs.borderRightWidth * m_zoom : bw;
+                float bwBottom = cs.borderBottomWidth >= 0 ? cs.borderBottomWidth * m_zoom : bw;
+                float bwLeft = cs.borderLeftWidth >= 0 ? cs.borderLeftWidth * m_zoom : bw;
+                float outerW = bwLeft + pLeft + dw + pRight + bwRight;
+                float outerH = bwTop + pTop + dh + pBottom + bwBottom;
+                // Apply text-align to position within parent
+                float objX = ctx.x;
+                if (ctx.textAlign == 2) objX = ctx.x + ctx.contentW - outerW;
+                else if (ctx.textAlign == 1) objX = ctx.x + (ctx.contentW - outerW) * 0.5f;
                 if (!ctx.dryRun && m_rt) {
                     float sy = ctx.y - ctx.scrollY + ctx.topInset;
-                    if (sy + dh >= ctx.topInset && sy < ctx.winH) {
+                    if (sy + outerH >= ctx.topInset && sy < ctx.winH) {
+                        D2D1_RECT_F outer = D2D1::RectF(objX, sy, objX + outerW, sy + outerH);
+                        if (cs.bgColor.valid) {
+                            if (auto* bg = TempBrush(ToD2D(cs.bgColor))) m_rt->FillRectangle(outer, bg);
+                        }
+                        if (!cs.backgroundImage.empty()) {
+                            std::string bgUrl = ResolveUrl(cs.backgroundImage, ctx.baseUrl);
+                            auto bit = m_images.find(bgUrl);
+                            if (bit != m_images.end() && bit->second) {
+                                ID2D1BitmapBrush* brush = nullptr;
+                                if (SUCCEEDED(m_rt->CreateBitmapBrush(bit->second,
+                                        D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_WRAP, D2D1_EXTEND_MODE_WRAP,
+                                            D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR), &brush))) {
+                                    m_rt->FillRectangle(outer, brush);
+                                    brush->Release();
+                                }
+                            }
+                        }
                         m_rt->DrawBitmap(it->second,
-                            D2D1::RectF(ctx.x, sy, ctx.x + dw, sy + dh));
+                            D2D1::RectF(objX + bwLeft + pLeft, sy + bwTop + pTop,
+                                        objX + bwLeft + pLeft + dw, sy + bwTop + pTop + dh));
+                        auto sideBrush = [&](const CssColor& side) -> ID2D1SolidColorBrush* {
+                            if (side.valid) return TempBrush(ToD2D(side));
+                            if (cs.borderColor.valid) return TempBrush(ToD2D(cs.borderColor));
+                            if (cs.color.valid) return TempBrush(ToD2D(cs.color));
+                            return m_hrBrush;
+                        };
+                        if (bwTop > 0) if (auto* b = sideBrush(cs.borderTopColor))
+                            m_rt->FillRectangle(D2D1::RectF(objX, sy, objX + outerW, sy + bwTop), b);
+                        if (bwBottom > 0) if (auto* b = sideBrush(cs.borderBottomColor))
+                            m_rt->FillRectangle(D2D1::RectF(objX, sy + outerH - bwBottom, objX + outerW, sy + outerH), b);
+                        if (bwLeft > 0) if (auto* b = sideBrush(cs.borderLeftColor))
+                            m_rt->FillRectangle(D2D1::RectF(objX, sy, objX + bwLeft, sy + outerH), b);
+                        if (bwRight > 0) if (auto* b = sideBrush(cs.borderRightColor))
+                            m_rt->FillRectangle(D2D1::RectF(objX + outerW - bwRight, sy, objX + outerW, sy + outerH), b);
                     }
                 }
-                ctx.y += dh + kMarginY;
+                ctx.y += outerH + kMarginY;
             } else if (!m_loadingImages.count(data)) {
                 m_loadingImages.insert(data);
                 if (m_imageRequestCb) m_imageRequestCb(data);
@@ -763,17 +916,10 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         goto restore;
     }
 
-    // ── headings ──────────────────────────────────────────────────────────
-    if (tag.size() == 2 && tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6') {
-        float topGap = (tag[1] == '1') ? kMarginY * 2.f : kMarginY * 1.5f;
-        ctx.y += topGap;
-        int was = ctx.headingLevel;
+    // ── headings set level, then fall through to block handler ──────────
+    int prevHeadingLevel = ctx.headingLevel;
+    if (tag.size() == 2 && tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6')
         ctx.headingLevel = tag[1] - '0';
-        walkChildren();
-        ctx.headingLevel = was;
-        ctx.y += kMarginY * 0.5f;
-        goto restore;
-    }
 
     // ── hr ────────────────────────────────────────────────────────────────
     if (tag == "hr") {
@@ -791,7 +937,7 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
     }
 
     // ── blockquote ───────────────────────────────────────────────────────
-    if (tag == "blockquote") {
+    if (tag == "blockquote" && cs.positionMode == 0 && cs.floatMode == 0) {
         ctx.y += kMarginY;
         float barX   = ctx.x;
         float savedX = ctx.x, savedW = ctx.contentW;
@@ -816,7 +962,66 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
     }
 
     // ── lists ─────────────────────────────────────────────────────────────
-    if (tag == "ul") {
+    if ((tag == "ul" || tag == "ol") && cs.isDisplayTable() && cs.positionMode == 0) {
+        // display:table — apply margins, then render children as table cells
+        float mTop  = cs.marginTopSet() && !cs.isMarginAuto(cs.marginTop) ? cs.marginTop * m_zoom : 0.f;
+        float mBot  = cs.marginBottomSet() && !cs.isMarginAuto(cs.marginBottom) ? cs.marginBottom * m_zoom : 0.f;
+        float mLeft = cs.marginLeftSet() && !cs.isMarginAuto(cs.marginLeft) ? cs.marginLeft * m_zoom : 0.f;
+        ctx.y += mTop;
+        float startX = ctx.x + mLeft;
+        float rowY   = ctx.y;
+        int   wasStyle = ctx.listStyle;
+        ctx.listStyle = 0;
+
+        // Precompute table dimensions for background painting
+        float xOff = 0.f, maxH = 0.f;
+        for (auto& child : node->children) {
+            if (child->type != NodeType::Element) continue;
+            auto ccs = ctx.sheet->resolve(child.get());
+            if (ccs.isDisplayNone()) continue;
+            float cw = ccs.width >= 0 ? ccs.width * m_zoom : 24.f;
+            float ch = ccs.height >= 0 ? ccs.height * m_zoom : 12.f;
+            float bl = (ccs.borderLeftWidth  >= 0 ? ccs.borderLeftWidth  : ccs.borderWidth >= 0 ? ccs.borderWidth : 0.f) * m_zoom;
+            float br = (ccs.borderRightWidth >= 0 ? ccs.borderRightWidth : ccs.borderWidth >= 0 ? ccs.borderWidth : 0.f) * m_zoom;
+            float ml = ccs.marginLeftSet() && !ccs.isMarginAuto(ccs.marginLeft) ? ccs.marginLeft * m_zoom : 0.f;
+            float mr = ccs.marginRightSet() && !ccs.isMarginAuto(ccs.marginRight) ? ccs.marginRight * m_zoom : 0.f;
+            maxH = std::max(maxH, ch);
+            xOff += ml + bl + cw + br + mr;
+        }
+
+        // Paint table background FIRST (behind cells)
+        if (cs.bgColor.valid && !ctx.dryRun && m_rt) {
+            float sy = rowY - ctx.scrollY + ctx.topInset;
+            float ey = sy + maxH;
+            if (ey > ctx.topInset && sy < ctx.winH) {
+                auto* bg = TempBrush(ToD2D(cs.bgColor));
+                if (bg) m_rt->FillRectangle(D2D1::RectF(startX, sy, startX + xOff, ey), bg);
+            }
+        }
+
+        // Now render cells on top of the background
+        xOff = 0.f;
+        for (auto& child : node->children) {
+            if (child->type != NodeType::Element) continue;
+            auto ccs = ctx.sheet->resolve(child.get());
+            if (ccs.isDisplayNone()) continue;
+            float cw = ccs.width >= 0 ? ccs.width * m_zoom : 24.f;
+            float bl = (ccs.borderLeftWidth  >= 0 ? ccs.borderLeftWidth  : ccs.borderWidth >= 0 ? ccs.borderWidth : 0.f) * m_zoom;
+            float br = (ccs.borderRightWidth >= 0 ? ccs.borderRightWidth : ccs.borderWidth >= 0 ? ccs.borderWidth : 0.f) * m_zoom;
+            float ml = ccs.marginLeftSet() && !ccs.isMarginAuto(ccs.marginLeft) ? ccs.marginLeft * m_zoom : 0.f;
+            float mr = ccs.marginRightSet() && !ccs.isMarginAuto(ccs.marginRight) ? ccs.marginRight * m_zoom : 0.f;
+            PaintCtx cc = ctx;
+            cc.x        = startX + xOff;
+            cc.y        = rowY;
+            cc.contentW = cw;
+            WalkNode(child.get(), cc);
+            xOff += ml + bl + cw + br + mr;
+        }
+        ctx.listStyle = wasStyle;
+        ctx.y = rowY + maxH + mBot;
+        goto restore;
+    }
+    if (tag == "ul" && cs.positionMode == 0) {
         int  wasStyle = ctx.listStyle;
         ctx.listStyle = 1;
         ctx.x       += 20.f; ctx.contentW -= 20.f;
@@ -825,7 +1030,7 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         ctx.listStyle = wasStyle;
         goto restore;
     }
-    if (tag == "ol") {
+    if (tag == "ol" && cs.positionMode == 0) {
         int wasStyle = ctx.listStyle, wasCtr = ctx.listCounter;
         ctx.listStyle  = 2;
         ctx.listCounter= 0;
@@ -836,7 +1041,7 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         ctx.listCounter= wasCtr;
         goto restore;
     }
-    if (tag == "li") {
+    if (tag == "li" && ctx.listStyle != 0 && cs.positionMode == 0 && !cs.listStyleNone) {
         ctx.y += 2.f;
         if (ctx.listStyle == 2) {
             ctx.listCounter++;
@@ -984,6 +1189,12 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         goto restore;
     }
 
+    // ── display:inline on normally-block elements ──────────────────────
+    if (cs.isDisplayInline() && tag != "object" && tag != "img") {
+        walkChildren();
+        goto restore;
+    }
+
     // ── block elements ────────────────────────────────────────────────────
     {
         bool isBlock = (
@@ -994,65 +1205,146 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
          || tag == "dl"      || tag == "dt"      || tag == "dd"
          || tag == "table"   || tag == "tr"      || tag == "tbody"    || tag == "thead"
          || tag == "body"    || tag == "#document" || tag == "html"
-        );
+         || tag == "blockquote" || tag == "address" || tag == "ul"    || tag == "ol"
+         || tag == "li"
+         || (tag.size() == 2 && tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6')
+        ) || cs.isDisplayBlock();
         bool notRoot = (tag != "body" && tag != "#document" && tag != "html");
 
-        // Box model (values < 0 = not set; -2 = auto for margins)
-        float mTop  = cs.marginTop    >= 0 ? cs.marginTop    * m_zoom
-                    : (isBlock && notRoot ? kMarginY * 0.5f : 0.f);
-        float mBot  = cs.marginBottom >= 0 ? cs.marginBottom * m_zoom
-                    : (isBlock && notRoot ? kMarginY * 0.5f : 0.f);
-        float mLeft = (cs.marginLeft >= 0) ? cs.marginLeft * m_zoom : 0.f;
+        // CSS gives divs no default margins. Keep browser-like margins only on
+        // elements that traditionally receive them from the user-agent sheet.
+        bool hasDefaultBlockMargin = tag == "p" || tag == "blockquote" || tag == "pre"
+            || tag == "ul" || tag == "ol" || tag == "dl" || tag == "figure"
+            || (tag.size() == 2 && tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6');
+
+        // Box model
+        float mTop  = cs.marginTopSet() && !cs.isMarginAuto(cs.marginTop) ? cs.marginTop * m_zoom
+                    : (hasDefaultBlockMargin ? kMarginY * 0.5f : 0.f);
+        float mBot  = cs.marginBottomSet() && !cs.isMarginAuto(cs.marginBottom) ? cs.marginBottom * m_zoom
+                    : (hasDefaultBlockMargin ? kMarginY * 0.5f : 0.f);
+        float mLeft  = cs.marginLeftSet() && !cs.isMarginAuto(cs.marginLeft) ? cs.marginLeft * m_zoom : 0.f;
+        float mRight = cs.marginRightSet() && !cs.isMarginAuto(cs.marginRight) ? cs.marginRight * m_zoom : 0.f;
         float pTop  = cs.paddingTop   >= 0 ? cs.paddingTop    * m_zoom : 0.f;
         float pBot  = cs.paddingBottom>= 0 ? cs.paddingBottom * m_zoom : 0.f;
         float pLeft = cs.paddingLeft  >= 0 ? cs.paddingLeft   * m_zoom : 0.f;
         float pRight= cs.paddingRight >= 0 ? cs.paddingRight  * m_zoom : 0.f;
         float bw    = cs.borderWidth  >= 0 ? cs.borderWidth   * m_zoom : 0.f;
+        float bwTop = cs.borderTopWidth    >= 0 ? cs.borderTopWidth    * m_zoom : bw;
+        float bwRight  = cs.borderRightWidth  >= 0 ? cs.borderRightWidth  * m_zoom : bw;
+        float bwBot = cs.borderBottomWidth >= 0 ? cs.borderBottomWidth * m_zoom : bw;
+        float bwLeft   = cs.borderLeftWidth   >= 0 ? cs.borderLeftWidth   * m_zoom : bw;
         float pw    = cs.widthPercent >= 0 ? prevW * (cs.widthPercent / 100.f)
                     : cs.width        >= 0 ? cs.width         * m_zoom : -1.f;
         float maxw  = cs.maxWidth     >= 0 ? cs.maxWidth      * m_zoom : -1.f;
 
-        bool isFloat = isBlock && notRoot && cs.floatMode != 0;
+        int effectiveFloat = cs.floatMode;
+        if (cs.floatInherit && effectiveFloat == 0) effectiveFloat = ctx.floatMode;
+        bool isFloat = isBlock && notRoot && effectiveFloat != 0;
         bool outOfFlow = isBlock && notRoot && (cs.positionMode == 2 || cs.positionMode == 3);
         float flowStartY = ctx.y;
         if (cs.clearMode != 0 && ctx.floatBottom > ctx.y) ctx.y = ctx.floatBottom;
-        if (isBlock) ctx.y += mTop;
+        if (isBlock && !isFloat && !outOfFlow) {
+            // Basic adjacent-sibling margin collapsing: collapse top margin
+            // with previous sibling's bottom margin (take the larger, don't add)
+            if (ctx.lastMarginBot != 0.f && mTop != 0.f) {
+                if (mTop >= 0 && ctx.lastMarginBot >= 0)
+                    mTop = std::max(0.f, mTop - ctx.lastMarginBot);
+                else if (mTop < 0 && ctx.lastMarginBot < 0)
+                    mTop = std::max(mTop, ctx.lastMarginBot) - ctx.lastMarginBot;
+            }
+            ctx.y += mTop;
+        } else if (isBlock) {
+            ctx.y += mTop;
+        }
         float boxStartY = ctx.y;
 
+        // Record block-level anchors AFTER top margin (so scroll targets the content)
+        if (!ctx.dryRun) {
+            std::string id = node->attr("id");
+            if (!id.empty() && !m_anchorY.count(id)) m_anchorY[id] = ctx.y;
+            std::string name = node->attr("name");
+            if (!name.empty() && !m_anchorY.count(name)) m_anchorY[name] = ctx.y;
+        }
+
         // Compute inner width
-        float innerW = (pw >= 0) ? pw : std::max(10.f, prevW - mLeft - (bw+pLeft) - (bw+pRight));
+        float innerW = (pw >= 0) ? pw : std::max(0.f, prevW - mLeft - (bwLeft+pLeft) - (bwRight+pRight));
+        if (outOfFlow && pw < 0) {
+            float shrinkW = EstimateExplicitOuterWidth(node, ctx.sheet, m_zoom);
+            if (shrinkW > 0) {
+                // shrinkW is the total outer width including margins+borders; strip them to get content width
+                float adj = shrinkW - mLeft - mRight - (bwLeft+pLeft) - (bwRight+pRight);
+                if (adj > 0) innerW = std::min(prevW, adj);
+            }
+        }
         if (maxw >= 0 && innerW > maxw) innerW = maxw;
 
         // Horizontal auto-centering: margin-left==auto && margin-right==auto
-        bool autoCenter = (cs.marginLeft <= -1.5f && cs.marginRight <= -1.5f && maxw >= 0 && innerW < prevW);
-        if (autoCenter) mLeft = (prevW - innerW - (bw+pLeft) - (bw+pRight)) * 0.5f;
+        bool autoCenter = (cs.isMarginAuto(cs.marginLeft) && cs.isMarginAuto(cs.marginRight) && innerW < prevW);
+        if (autoCenter) mLeft = (prevW - innerW - (bwLeft+pLeft) - (bwRight+pRight)) * 0.5f;
 
+        // Percentage heights compute to auto when containing block height is not explicit
         float explicitH = cs.height >= 0 ? cs.height * m_zoom : -1.f;
+        if (explicitH < 0 && cs.heightPercent >= 0) explicitH = -1.f; // percentage → auto
+        const float minH = cs.minHeight >= 0 ? cs.minHeight * m_zoom
+                         : (cs.minHeightPercent >= 0 ? -1.f : -1.f); // percentage → auto
+        const float maxH = cs.maxHeight >= 0 ? cs.maxHeight * m_zoom : -1.f;
+        if (explicitH >= 0) {
+            // CSS 2.1: min-height takes precedence if min-height exceeds max-height.
+            if (maxH >= 0) explicitH = std::min(explicitH, maxH);
+            if (minH >= 0) explicitH = std::max(explicitH, minH);
+        }
 
-        float outerW = innerW + (bw + pLeft) + (bw + pRight);
+        float outerW = innerW + (bwLeft + pLeft) + (bwRight + pRight);
         float boxLeft = prevX + mLeft;
-        if (isFloat && cs.floatMode == 2) boxLeft = prevX + std::max(0.f, prevW - outerW);
+        if (isFloat && effectiveFloat == 2) boxLeft = prevX + std::max(0.f, prevW - outerW);
+        float relativeOffsetY = 0.f;
+        if (cs.positionMode == 1) {
+            // Relative positioning shifts the visual box and its containing
+            // block, but leaves the element's original normal-flow slot intact.
+            if (cs.leftSet)       boxLeft += cs.left * m_zoom;
+            else if (cs.rightSet) boxLeft -= cs.right * m_zoom;
+            if (cs.topSet)       relativeOffsetY += cs.top * m_zoom;
+            else if (cs.bottomSet) relativeOffsetY -= cs.bottom * m_zoom;
+            boxStartY += relativeOffsetY;
+            ctx.y += relativeOffsetY;
+        }
         if (outOfFlow) {
-            // Position relative to nearest positioned ancestor (containing block)
-            if (cs.leftSet)
-                boxLeft = ctx.containingBlockX + cs.left * m_zoom;
-            else if (cs.rightSet)
-                boxLeft = ctx.containingBlockX + ctx.containingBlockW
-                        - outerW - cs.right * m_zoom;
-            if (cs.topSet) {
-                boxStartY = ctx.containingBlockY + cs.top * m_zoom;
-                ctx.y = boxStartY;
-            } else if (cs.bottomSet && explicitH >= 0) {
-                // bottom + known height → compute top
-                boxStartY = ctx.containingBlockY - cs.bottom * m_zoom - explicitH - pTop - pBot - 2*bw;
-                ctx.y = boxStartY;
+            if (cs.positionMode == 3) {
+                // Fixed: position relative to viewport (always on screen regardless of scroll)
+                if (cs.leftSet)       boxLeft    = cs.left * m_zoom;
+                else if (cs.rightSet) boxLeft    = (float)m_width - outerW - cs.right * m_zoom;
+                if (cs.topSet)    { boxStartY = ctx.scrollY + cs.top * m_zoom + mTop;  ctx.y = boxStartY; }
+                else if (cs.bottomSet && explicitH >= 0) {
+                    boxStartY = ctx.scrollY + (float)m_height - cs.bottom * m_zoom
+                              - explicitH - pTop - pBot - bwTop - bwBot;
+                    ctx.y = boxStartY;
+                }
+            } else {
+                // Absolute: position relative to nearest positioned ancestor
+                if (cs.leftSet)
+                    boxLeft = ctx.containingBlockX + cs.left * m_zoom;
+                else if (cs.rightSet)
+                    boxLeft = ctx.containingBlockX + ctx.containingBlockW
+                            - outerW - cs.right * m_zoom;
+                if (cs.topSet) {
+                    boxStartY = ctx.containingBlockY + cs.top * m_zoom + mTop;
+                    ctx.y = boxStartY;
+                } else if (cs.bottomSet && explicitH >= 0) {
+                    boxStartY = ctx.containingBlockY - cs.bottom * m_zoom
+                              - explicitH - pTop - pBot - bwTop - bwBot - mTop;
+                    ctx.y = boxStartY;
+                }
             }
         }
 
         // Set up inner ctx
-        ctx.x        = boxLeft + bw + pLeft;
+        ctx.x        = boxLeft + bwLeft + pLeft;
         ctx.contentW = innerW;
-        ctx.y       += bw + pTop;
+        ctx.y       += bwTop + pTop;
+
+        // Save/update float mode for inherit
+        int prevFloatMode = ctx.floatMode;
+        if (effectiveFloat != 0) ctx.floatMode = effectiveFloat;
 
         // Save/update containing block for positioned children
         float prevCBX = ctx.containingBlockX;
@@ -1065,17 +1357,29 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         }
 
         // Dry-run to get box height for background painting and overflow clipping.
-        // absMaxY tracks the bottom edge of out-of-flow children (they don't advance y).
         float dryEndY = ctx.y;
         if ((cs.bgColor.valid || !cs.backgroundImage.empty() || cs.overflowHidden) && isBlock && !ctx.dryRun) {
-            PaintCtx dry = ctx;
-            dry.dryRun   = true;
-            dry.absMaxY  = ctx.y;
-            for (auto& c : node->children) WalkNode(c.get(), dry);
-            // Use the larger of: normal-flow extent OR absolute-children extent
-            dryEndY = std::max(dry.y, dry.absMaxY) + pBot + bw;
+            if (cs.positionMode == 2 || cs.positionMode == 3) {
+                // For abs/fixed containers, children overlap (3-layer painting).
+                // Take the max extent of any single child, not the sum.
+                float maxChildEnd = ctx.y;
+                for (auto& c : node->children) {
+                    PaintCtx dry = ctx;
+                    dry.dryRun = true;
+                    dry.absMaxY = ctx.y;
+                    WalkNode(c.get(), dry);
+                    maxChildEnd = std::max(maxChildEnd, std::max(dry.y, dry.absMaxY));
+                }
+                dryEndY = maxChildEnd + pBot + bwBot;
+            } else {
+                PaintCtx dry = ctx;
+                dry.dryRun   = true;
+                dry.absMaxY  = ctx.y;
+                for (auto& c : node->children) WalkNode(c.get(), dry);
+                dryEndY = std::max(dry.y, dry.absMaxY) + pBot + bwBot;
+            }
             if (explicitH >= 0) {
-                float minEnd = boxStartY + bw + pTop + explicitH + pBot + bw;
+                float minEnd = boxStartY + bwTop + pTop + explicitH + pBot + bwBot;
                 if (dryEndY < minEnd) dryEndY = minEnd;
             }
         }
@@ -1106,34 +1410,38 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
         // Without explicit height the container's CSS height = normal-flow children only,
         // so absolutely positioned children would extend beyond it and be wrongly clipped.
         if (!cs.backgroundImage.empty() && isBlock && !ctx.dryRun) {
-            std::string bgUrl = ResolveUrl(cs.backgroundImage, ctx.baseUrl);
-            auto it = m_images.find(bgUrl);
-            if (it != m_images.end() && it->second && m_rt) {
-                float sy = boxStartY - ctx.scrollY + ctx.topInset;
-                float ey = dryEndY   - ctx.scrollY + ctx.topInset;
-                if (ey > ctx.topInset && sy < ctx.winH) {
-                    D2D1_RECT_F rect = D2D1::RectF(boxLeft, sy, boxLeft + outerW, ey);
-                    ID2D1BitmapBrush* brush = nullptr;
-                    D2D1_BITMAP_BRUSH_PROPERTIES props =
-                        D2D1::BitmapBrushProperties(
-                            D2D1_EXTEND_MODE_WRAP,
-                            D2D1_EXTEND_MODE_WRAP,
-                            D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
-                    if (SUCCEEDED(m_rt->CreateBitmapBrush(it->second, props, &brush))) {
-                        m_rt->FillRectangle(rect, brush);
-                        brush->Release();
+            bool skipBgImage = cs.bgNoRepeat && cs.bgFixed;
+            if (!skipBgImage) {
+                std::string bgUrl = ResolveUrl(cs.backgroundImage, ctx.baseUrl);
+                auto it = m_images.find(bgUrl);
+                if (it != m_images.end() && it->second && m_rt) {
+                    float sy = boxStartY - ctx.scrollY + ctx.topInset;
+                    float ey = dryEndY   - ctx.scrollY + ctx.topInset;
+                    if (ey > ctx.topInset && sy < ctx.winH) {
+                        D2D1_RECT_F rect = D2D1::RectF(boxLeft, sy, boxLeft + outerW, ey);
+                        D2D1_EXTEND_MODE extX = cs.bgNoRepeat ? D2D1_EXTEND_MODE_CLAMP : D2D1_EXTEND_MODE_WRAP;
+                        D2D1_EXTEND_MODE extY = cs.bgNoRepeat ? D2D1_EXTEND_MODE_CLAMP : D2D1_EXTEND_MODE_WRAP;
+                        ID2D1BitmapBrush* brush = nullptr;
+                        D2D1_BITMAP_BRUSH_PROPERTIES props =
+                            D2D1::BitmapBrushProperties(extX, extY,
+                                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+                        if (SUCCEEDED(m_rt->CreateBitmapBrush(it->second, props, &brush))) {
+                            m_rt->FillRectangle(rect, brush);
+                            brush->Release();
+                        }
                     }
+                } else if (!bgUrl.empty() && !m_loadingImages.count(bgUrl)) {
+                    m_loadingImages.insert(bgUrl);
+                    if (m_imageRequestCb) m_imageRequestCb(bgUrl);
                 }
-            } else if (!bgUrl.empty() && !m_loadingImages.count(bgUrl)) {
-                m_loadingImages.insert(bgUrl);
-                if (m_imageRequestCb) m_imageRequestCb(bgUrl);
             }
         }
 
         bool didClip = false;
-        if (cs.overflowHidden && explicitH >= 0 && !ctx.dryRun && m_rt) {
-            float clipSy = (boxStartY + bw + pTop) - ctx.scrollY + ctx.topInset;
-            float clipEy = clipSy + explicitH * m_zoom;
+        float clipH = explicitH >= 0 ? explicitH : (dryEndY > boxStartY + bwTop + pTop ? dryEndY - boxStartY - bwTop - pTop - pBot - bwBot : -1.f);
+        if (cs.overflowHidden && clipH >= 0 && !ctx.dryRun && m_rt) {
+            float clipSy = (boxStartY + bwTop + pTop) - ctx.scrollY + ctx.topInset;
+            float clipEy = clipSy + clipH;
             float clipSx = boxLeft;
             float clipEx = boxLeft + outerW;
             if (clipEy > clipSy && clipEx > clipSx) {
@@ -1149,48 +1457,130 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
 
         if (didClip) m_rt->PopAxisAlignedClip();
 
-        // Enforce minimum height from explicit height property
+        // Enforce min/max height constraints
         if (explicitH >= 0) {
-            float minEnd = boxStartY + bw + pTop + explicitH;
+            float minEnd = boxStartY + bwTop + pTop + explicitH;
+            if (ctx.y < minEnd) ctx.y = minEnd;
+        }
+        if (maxH >= 0) {
+            float maxEnd = boxStartY + bwTop + pTop + maxH;
+            if (ctx.y > maxEnd) ctx.y = maxEnd;
+        }
+        if (minH >= 0) {
+            float minEnd = boxStartY + bwTop + pTop + minH;
             if (ctx.y < minEnd) ctx.y = minEnd;
         }
 
-        ctx.y += pBot + bw;
+        ctx.y += pBot + bwBot;
         float boxEndY = ctx.y;
 
-        // Restore containing block
+        // Restore containing block and float mode
         ctx.containingBlockX = prevCBX;
         ctx.containingBlockY = prevCBY;
         ctx.containingBlockW = prevCBW;
+        ctx.floatMode = prevFloatMode;
 
         // Border
-        if (bw > 0 && !ctx.dryRun && m_rt) {
+        bool hasBorder = (bwTop > 0 || bwRight > 0 || bwBot > 0 || bwLeft > 0);
+        if (hasBorder && !ctx.dryRun && m_rt) {
             float sy = boxStartY - ctx.scrollY + ctx.topInset;
             float ey = boxEndY   - ctx.scrollY + ctx.topInset;
             if (ey > ctx.topInset && sy < ctx.winH) {
-                auto* bc = cs.borderColor.valid ? TempBrush(ToD2D(cs.borderColor)) : m_hrBrush;
-                if (bc) {
-                    D2D1_RECT_F rect = D2D1::RectF(boxLeft, sy,
-                                                    boxLeft + outerW, ey);
-                    if (cs.borderRadius > 0)
-                        m_rt->DrawRoundedRectangle(
-                            D2D1::RoundedRect(rect, cs.borderRadius * m_zoom, cs.borderRadius * m_zoom), bc, bw);
-                    else
-                        m_rt->DrawRectangle(rect, bc, bw);
+                auto sideBrush = [&](const CssColor& side) -> ID2D1SolidColorBrush* {
+                    if (side.valid) return TempBrush(ToD2D(side));
+                    if (cs.borderColor.valid) return TempBrush(ToD2D(cs.borderColor));
+                    if (cs.color.valid) return TempBrush(ToD2D(cs.color));
+                    return m_hrBrush;
+                };
+                if (sideBrush(cs.borderTopColor) || sideBrush(cs.borderRightColor)
+                    || sideBrush(cs.borderBottomColor) || sideBrush(cs.borderLeftColor)) {
+                    float sx = boxLeft, ex = boxLeft + outerW;
+                    bool uniform = (bwTop == bwBot && bwTop == bwLeft && bwLeft == bwRight);
+                    bool uniformColor = !cs.borderTopColor.valid && !cs.borderRightColor.valid
+                        && !cs.borderBottomColor.valid && !cs.borderLeftColor.valid;
+                    if (uniform && uniformColor) {
+                        auto* bc = sideBrush(cs.borderColor);
+                        D2D1_RECT_F rect = D2D1::RectF(sx, sy, ex, ey);
+                        if (cs.borderRadius > 0)
+                            m_rt->DrawRoundedRectangle(
+                                D2D1::RoundedRect(rect, cs.borderRadius * m_zoom, cs.borderRadius * m_zoom), bc, bwTop);
+                        else
+                            m_rt->DrawRectangle(rect, bc, bwTop);
+                    } else if (innerW <= 0.01f && explicitH == 0.f) {
+                        // CSS borders meet diagonally around a zero-size box.
+                        // This is how generated border boxes form triangles rather
+                        // than four rectangular strips (used by the Acid2 nose).
+                        auto fillTriangle = [&](D2D1_POINT_2F a, D2D1_POINT_2F b,
+                                                D2D1_POINT_2F c, ID2D1SolidColorBrush* brush) {
+                            if (!brush || !m_factory) return;
+                            ID2D1PathGeometry* geometry = nullptr;
+                            ID2D1GeometrySink* sink = nullptr;
+                            if (FAILED(m_factory->CreatePathGeometry(&geometry)) || !geometry) return;
+                            if (SUCCEEDED(geometry->Open(&sink)) && sink) {
+                                sink->BeginFigure(a, D2D1_FIGURE_BEGIN_FILLED);
+                                const D2D1_POINT_2F points[] = { b, c };
+                                sink->AddLines(points, 2);
+                                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                                sink->Close();
+                                m_rt->FillGeometry(geometry, brush);
+                                sink->Release();
+                            }
+                            geometry->Release();
+                        };
+                        const D2D1_POINT_2F center = D2D1::Point2F(sx + bwLeft, sy + bwTop);
+                        if (bwTop > 0) fillTriangle(D2D1::Point2F(sx, sy), D2D1::Point2F(ex, sy), center, sideBrush(cs.borderTopColor));
+                        if (bwRight > 0) fillTriangle(D2D1::Point2F(ex, sy), D2D1::Point2F(ex, ey), center, sideBrush(cs.borderRightColor));
+                        if (bwBot > 0) fillTriangle(D2D1::Point2F(ex, ey), D2D1::Point2F(sx, ey), center, sideBrush(cs.borderBottomColor));
+                        if (bwLeft > 0) fillTriangle(D2D1::Point2F(sx, ey), D2D1::Point2F(sx, sy), center, sideBrush(cs.borderLeftColor));
+                    } else {
+                        if (bwTop > 0) {
+                            if (auto* bc = sideBrush(cs.borderTopColor)) m_rt->FillRectangle(D2D1::RectF(sx, sy, ex, sy + bwTop), bc);
+                        }
+                        if (bwBot > 0) {
+                            if (auto* bc = sideBrush(cs.borderBottomColor)) m_rt->FillRectangle(D2D1::RectF(sx, ey - bwBot, ex, ey), bc);
+                        }
+                        if (bwLeft > 0) {
+                            if (auto* bc = sideBrush(cs.borderLeftColor)) m_rt->FillRectangle(D2D1::RectF(sx, sy, sx + bwLeft, ey), bc);
+                        }
+                        if (bwRight > 0) {
+                            if (auto* bc = sideBrush(cs.borderRightColor)) m_rt->FillRectangle(D2D1::RectF(ex - bwRight, sy, ex, ey), bc);
+                        }
+                    }
                 }
             }
         }
+
+        // Check if this element is "empty" for margin-collapsing purposes:
+        // no content height, no padding-top/bottom, no border-top/bottom
+        float contentH = boxEndY - boxStartY - bwTop - pTop - pBot - bwBot;
+        bool isEmpty = isBlock && !isFloat && !outOfFlow && contentH <= 0.01f
+                     && pTop <= 0.f && pBot <= 0.f && bwTop <= 0.f && bwBot <= 0.f
+                     && explicitH < 0 && minH < 0;
 
         if (isFloat) {
             ctx.floatBottom = std::max(ctx.floatBottom, boxEndY + mBot);
             ctx.y = flowStartY;
         } else if (outOfFlow) {
-            // Let parent dry-run know how far this positioned child reached
             ctx.absMaxY = std::max(ctx.absMaxY, boxEndY + mBot);
             ctx.y = flowStartY;
         } else {
+            if (cs.positionMode == 1) ctx.y -= relativeOffsetY;
             if (ctx.floatBottom > ctx.y) ctx.y = ctx.floatBottom;
-            if (isBlock) ctx.y += mBot;
+            if (isBlock) {
+                if (isEmpty) {
+                    // Empty element: own top/bottom margins collapse.
+                    // Undo the top margin and use the larger of top/bottom.
+                    ctx.y -= mTop;
+                    float collapsed = (mTop >= 0 && mBot >= 0)
+                                    ? std::max(mTop, mBot)
+                                    : mTop + mBot;
+                    ctx.y += collapsed;
+                    ctx.lastMarginBot = collapsed;
+                } else {
+                    ctx.y += mBot;
+                    ctx.lastMarginBot = mBot;
+                }
+            }
         }
     }
 
@@ -1206,6 +1596,7 @@ restore:
     ctx.textTransform    = prevTT;
     ctx.whiteSpaceNowrap = prevNowrap;
     ctx.fontFamily       = prevFamily;
+    ctx.headingLevel     = prevHeadingLevel;
     return ctx.y;
 }
 
@@ -1251,11 +1642,11 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
 
     if (doc) {
         PaintCtx ctx;
-        ctx.y        = 16.f;
-        ctx.x        = kMarginX;
-        ctx.contentW = std::max(100.f, (float)m_width - kMarginX * 2.f);
-        ctx.containingBlockX = kMarginX;
-        ctx.containingBlockY = 16.f;
+        ctx.y        = 0.f;
+        ctx.x        = 0.f;
+        ctx.contentW = std::max(100.f, (float)m_width);
+        ctx.containingBlockX = 0.f;
+        ctx.containingBlockY = 0.f;
         ctx.containingBlockW = ctx.contentW;
         ctx.absMaxY          = 0.f;
         ctx.scrollY  = scrollY;

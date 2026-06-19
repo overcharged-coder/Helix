@@ -1,5 +1,9 @@
 #pragma once
 #include <string>
+#include <cmath>
+
+static constexpr float kCssNotSet = -1e6f;
+static constexpr float kCssAuto   = -2.f;
 
 struct CssColor {
     bool  valid = false;
@@ -14,25 +18,35 @@ struct ComputedStyle {
     std::string backgroundImage;     // URL from background-image: url(...)
     bool     bgColorSet   = false;
     bool     backgroundImageSet = false;
+    bool     bgNoRepeat   = false;
+    bool     bgFixed      = false;
     float    fontSize     = 0;
     bool     bold         = false;
     bool     boldSet      = false;
     bool     italic       = false;
     bool     italicSet    = false;
     bool     underline    = false;
-    bool     displayNone  = false;
-    bool     displayBlock = false;
-    // Box model (-1 = not set, -2 = auto)
-    float    marginTop    = -1;
-    float    marginRight  = -1;
-    float    marginBottom = -1;
-    float    marginLeft   = -1;
+    // Display: 0=unset, 1=block, 2=inline, 3=none, 4=flex, 5=table, 6=table-cell
+    int      display      = 0;
+    // Box model (kCssNotSet = not set, kCssAuto = auto for margins)
+    float    marginTop    = kCssNotSet;
+    float    marginRight  = kCssNotSet;
+    float    marginBottom = kCssNotSet;
+    float    marginLeft   = kCssNotSet;
     float    paddingTop   = -1;
     float    paddingRight = -1;
     float    paddingBottom= -1;
     float    paddingLeft  = -1;
     float    borderWidth  = -1;
+    float    borderTopWidth    = -1;
+    float    borderRightWidth  = -1;
+    float    borderBottomWidth = -1;
+    float    borderLeftWidth   = -1;
     CssColor borderColor;
+    CssColor borderTopColor;
+    CssColor borderRightColor;
+    CssColor borderBottomColor;
+    CssColor borderLeftColor;
     float    borderRadius = 0;
     // Text
     float    lineHeight      = 0;
@@ -42,18 +56,27 @@ struct ComputedStyle {
     bool     textTransformSet= false;
     bool     whiteSpaceNowrap= false;
     bool     whiteSpaceSet   = false;
+    bool     whiteSpacePre   = false;
     // Sizing
     float    width        = -1;
     float    widthPercent = -1;
     float    height       = -1;
+    float    heightPercent = -1;
     float    maxWidth     = -1;
     float    minWidth     = -1;
     float    minHeight    = -1;
+    float    minHeightPercent = -1;
+    float    maxHeight    = -1;
+    // Generated content. This is only meaningful for :before/:after boxes.
+    bool     contentSet   = false;
+    std::string content;
     // Layout
     int      floatMode    = 0;       // 0=none, 1=left, 2=right
+    bool     floatInherit = false;
     int      clearMode    = 0;       // 0=none, 1=left, 2=right, 3=both
     int      positionMode = 0;       // 0=static, 1=relative, 2=absolute, 3=fixed
     bool     overflowHidden = false;
+    bool     overflowSet    = false;
     float    top          = 0;
     float    right        = 0;
     float    bottom       = 0;
@@ -62,8 +85,26 @@ struct ComputedStyle {
     bool     rightSet     = false;
     bool     bottomSet    = false;
     bool     leftSet      = false;
-    // Flex (very simplified)
-    bool     displayFlex  = false;
+    // Visibility
+    bool     visibilityHidden = false;
+    bool     visibilitySet    = false;
+    // List style
+    bool     listStyleNone    = false;
+    bool     listStyleSet     = false;
+    // Border-spacing
+    float    borderSpacing    = -1;
+
+    bool isDisplayNone()      const { return display == 3; }
+    bool isDisplayBlock()     const { return display == 1; }
+    bool isDisplayInline()    const { return display == 2; }
+    bool isDisplayFlex()      const { return display == 4; }
+    bool isDisplayTable()     const { return display == 5; }
+    bool isDisplayTableCell() const { return display == 6; }
+    bool marginTopSet()       const { return marginTop    > kCssNotSet + 1.f; }
+    bool marginRightSet()     const { return marginRight  > kCssNotSet + 1.f; }
+    bool marginBottomSet()    const { return marginBottom > kCssNotSet + 1.f; }
+    bool marginLeftSet()      const { return marginLeft   > kCssNotSet + 1.f; }
+    bool isMarginAuto(float v) const { return v > kCssAuto - 0.5f && v < kCssAuto + 0.5f; }
 
     ComputedStyle inherit(const ComputedStyle& child) const {
         ComputedStyle out = *this;
@@ -73,43 +114,59 @@ struct ComputedStyle {
         if (child.backgroundImageSet) {
             out.backgroundImage = child.backgroundImage;
             out.backgroundImageSet = true;
+            out.bgNoRepeat = child.bgNoRepeat;
+            out.bgFixed = child.bgFixed;
         }
         if (child.fontSize > 0)      out.fontSize  = child.fontSize;
         if (child.boldSet)   { out.bold = child.bold; out.boldSet = true; }
         if (child.italicSet) { out.italic = child.italic; out.italicSet = true; }
         if (child.underline)    out.underline   = true;
-        if (child.displayNone)  out.displayNone = true;
-        if (child.displayBlock) out.displayBlock = true;
-        if (child.displayFlex)  out.displayFlex = true;
-        if (child.marginTop    >= -1.5f) out.marginTop    = child.marginTop;
-        if (child.marginRight  >= -1.5f) out.marginRight  = child.marginRight;
-        if (child.marginBottom >= -1.5f) out.marginBottom = child.marginBottom;
-        if (child.marginLeft   >= -1.5f) out.marginLeft   = child.marginLeft;
+        if (child.display != 0)     out.display      = child.display;
+        if (child.marginTopSet())    out.marginTop    = child.marginTop;
+        if (child.marginRightSet())  out.marginRight  = child.marginRight;
+        if (child.marginBottomSet()) out.marginBottom = child.marginBottom;
+        if (child.marginLeftSet())   out.marginLeft   = child.marginLeft;
         if (child.paddingTop   >= 0) out.paddingTop    = child.paddingTop;
         if (child.paddingRight >= 0) out.paddingRight  = child.paddingRight;
         if (child.paddingBottom>= 0) out.paddingBottom = child.paddingBottom;
         if (child.paddingLeft  >= 0) out.paddingLeft   = child.paddingLeft;
-        if (child.borderWidth  >= 0) out.borderWidth   = child.borderWidth;
+        if (child.borderWidth       >= 0) out.borderWidth       = child.borderWidth;
+        if (child.borderTopWidth    >= 0) out.borderTopWidth    = child.borderTopWidth;
+        if (child.borderRightWidth  >= 0) out.borderRightWidth  = child.borderRightWidth;
+        if (child.borderBottomWidth >= 0) out.borderBottomWidth = child.borderBottomWidth;
+        if (child.borderLeftWidth   >= 0) out.borderLeftWidth   = child.borderLeftWidth;
         if (child.borderColor.valid) out.borderColor   = child.borderColor;
+        if (child.borderTopColor.valid) out.borderTopColor = child.borderTopColor;
+        if (child.borderRightColor.valid) out.borderRightColor = child.borderRightColor;
+        if (child.borderBottomColor.valid) out.borderBottomColor = child.borderBottomColor;
+        if (child.borderLeftColor.valid) out.borderLeftColor = child.borderLeftColor;
         if (child.borderRadius > 0)  out.borderRadius  = child.borderRadius;
         if (child.lineHeight   > 0)  out.lineHeight    = child.lineHeight;
         if (child.textAlignSet) { out.textAlign = child.textAlign; out.textAlignSet = true; }
         if (child.textTransformSet) { out.textTransform = child.textTransform; out.textTransformSet = true; }
-        if (child.whiteSpaceSet) { out.whiteSpaceNowrap = child.whiteSpaceNowrap; out.whiteSpaceSet = true; }
+        if (child.whiteSpaceSet) { out.whiteSpaceNowrap = child.whiteSpaceNowrap; out.whiteSpacePre = child.whiteSpacePre; out.whiteSpaceSet = true; }
         if (child.width        >= 0) out.width     = child.width;
         if (child.widthPercent >= 0) out.widthPercent = child.widthPercent;
         if (child.height       >= 0) out.height    = child.height;
+        if (child.heightPercent >= 0) out.heightPercent = child.heightPercent;
         if (child.maxWidth     >= 0) out.maxWidth  = child.maxWidth;
         if (child.minWidth     >= 0) out.minWidth  = child.minWidth;
         if (child.minHeight    >= 0) out.minHeight = child.minHeight;
+        if (child.minHeightPercent >= 0) out.minHeightPercent = child.minHeightPercent;
+        if (child.maxHeight    >= 0) out.maxHeight = child.maxHeight;
+        if (child.contentSet) { out.contentSet = true; out.content = child.content; }
         if (child.floatMode    != 0) out.floatMode = child.floatMode;
+        if (child.floatInherit)      out.floatInherit = true;
         if (child.clearMode    != 0) out.clearMode = child.clearMode;
         if (child.positionMode != 0) out.positionMode = child.positionMode;
-        if (child.overflowHidden) out.overflowHidden = true;
+        if (child.overflowSet)  { out.overflowHidden = child.overflowHidden; out.overflowSet = true; }
         if (child.topSet)    { out.top    = child.top;    out.topSet    = true; }
         if (child.rightSet)  { out.right  = child.right;  out.rightSet  = true; }
         if (child.bottomSet) { out.bottom = child.bottom; out.bottomSet = true; }
         if (child.leftSet)   { out.left   = child.left;   out.leftSet   = true; }
+        if (child.visibilitySet) { out.visibilityHidden = child.visibilityHidden; out.visibilitySet = true; }
+        if (child.listStyleSet) { out.listStyleNone = child.listStyleNone; out.listStyleSet = true; }
+        if (child.borderSpacing >= 0) out.borderSpacing = child.borderSpacing;
         return out;
     }
 };

@@ -44,6 +44,12 @@ TestResult RunHtmlTests() {
     RunDomFixture("autoclose-paragraphs", result);
 
     {
+        std::string actual = SerializeDom(ParseHtml("<p>A&nbsp;B</p>"));
+        std::string expected = "#document\n  <p>\n    #text \"A" + std::string("\xC2\xA0") + "B\"\n";
+        ExpectEqual("html/dom/non-breaking-space", actual, expected, result);
+    }
+
+    {
         std::string actual = SerializeDom(ParseHtml(
             "<html><body><div class=\"picture\"><p><table><tr><td></table>"
             "<p class=\"bad\"><blockquote class=\"first one\"></blockquote>"

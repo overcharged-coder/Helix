@@ -438,6 +438,7 @@ LRESULT CALLBACK UrlProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         Navigate(ToUtf8(buf));
         return 0;
     }
+    if (msg == WM_CHAR && wp == '\r') return 0;
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
