@@ -3,6 +3,7 @@
 #pragma comment(lib, "comctl32.lib")
 
 #include "network/fetcher.h"
+#include "network/url.h"
 #include "html/parser.h"
 #include "render/renderer.h"
 #include "js/engine.h"
@@ -111,20 +112,6 @@ static void UpdateTitle() {
     SetWindowTextW(g_hwnd, (t + L" \x2014 Helix").c_str());
 }
 
-static std::string ResolveResourceUrl(const std::string& href, const std::string& base) {
-    if (href.empty()) return {};
-    if (href.find("://") != std::string::npos) return href;
-    if (href.size() >= 2 && href[0] == '/' && href[1] == '/') return "https:" + href;
-    if (href[0] == '/') {
-        size_t p = base.find("://");
-        if (p == std::string::npos) return href;
-        size_t slash = base.find('/', p + 3);
-        return (slash == std::string::npos ? base : base.substr(0, slash)) + href;
-    }
-    size_t last = base.rfind('/');
-    return (last == std::string::npos ? base + "/" : base.substr(0, last + 1)) + href;
-}
-
 static bool AttrContainsToken(const std::string& value, const std::string& token) {
     std::string lower = LowerAscii(value);
     size_t start = 0;
@@ -173,7 +160,7 @@ static void LoadExternalStylesheets(const std::shared_ptr<Node>& dom, const std:
         if (n->type == NodeType::Element && n->tagName == "link"
             && AttrContainsToken(n->attr("rel"), "stylesheet")
             && StylesheetMediaApplies(n->attr("media"))) {
-            std::string href = ResolveResourceUrl(n->attr("href"), pageUrl);
+            std::string href = ResolveUrlAgainstBase(n->attr("href"), pageUrl);
             auto res = FetchUrl(href);
             if (res.success && !res.body.empty()) {
                 loadedBytes += res.body.size();

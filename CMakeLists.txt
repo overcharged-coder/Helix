@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(helix_engine STATIC
     src/network/fetcher.cpp
+    src/network/url.cpp
     src/html/tokenizer.cpp
     src/html/parser.cpp
     src/html/serializer.cpp

@@ -1,6 +1,7 @@
 #include "test/fixture.h"
 
 #include "network/fetcher.h"
+#include "network/url.h"
 
 TestResult RunNetworkTests() {
     TestResult result;
@@ -20,6 +21,22 @@ TestResult RunNetworkTests() {
             + std::to_string(res.body.size()) + " " + res.body + "\n";
         ExpectEqual("network/data-url/base64", actual,
             "success image/png 4 ABCD\n", result);
+    }
+
+    {
+        std::string actual;
+        actual += ResolveUrlAgainstBase("data:text/css,.picture%7Bbackground%3Anone%7D",
+            "https://www.webstandards.org/files/acid2/test.html") + "\n";
+        actual += ResolveUrlAgainstBase("/files/acid2/reference.html",
+            "https://www.webstandards.org/files/acid2/test.html") + "\n";
+        actual += ResolveUrlAgainstBase("reference.html",
+            "https://www.webstandards.org/files/acid2/test.html") + "\n";
+        ExpectEqual("network/resolve-url/scheme-and-relative",
+            actual,
+            "data:text/css,.picture%7Bbackground%3Anone%7D\n"
+            "https://www.webstandards.org/files/acid2/reference.html\n"
+            "https://www.webstandards.org/files/acid2/reference.html\n",
+            result);
     }
 
     return result;
