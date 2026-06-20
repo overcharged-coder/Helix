@@ -4,12 +4,23 @@
 #include <unordered_set>
 #include <vector>
 #include <string>
+#include <stdexcept>
+
+// Global wall-clock deadline (steady_clock milliseconds) for the current
+// top-level JS run, set by VM::execute. Native allocation loops check it so a
+// runaway script implemented in C++ (DOM/string churn) can't hang the browser.
+// 0 = no deadline active.
+extern long long g_jsDeadlineMs;
+long long JsNowMs();
 
 class GC {
 public:
     // Allocate a new GcCell-derived object and register it in the heap.
     template<typename T, typename... Args>
     T* alloc(Args&&... args) {
+        // Runaway-script guard: cheap periodic wall-clock check.
+        if (g_jsDeadlineMs && (++m_allocCheck & 0x3FFF) == 0 && JsNowMs() > g_jsDeadlineMs)
+            throw std::runtime_error("Script execution exceeded time limit");
         auto* p = new T(std::forward<Args>(args)...);
         p->gcNext = m_head;
         m_head    = p;
@@ -56,6 +67,7 @@ public:
 private:
     GcCell* m_head        = nullptr;
     size_t  m_allocCount  = 0;
+    size_t  m_allocCheck  = 0;   // counter for periodic deadline checks
     size_t  m_gcThreshold = 4096;
 
     std::unordered_map<std::string, JsString*> m_strings; // interning table

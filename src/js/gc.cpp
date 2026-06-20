@@ -3,6 +3,14 @@
 #include <cassert>
 #include <algorithm>
 #include <sstream>
+#include <chrono>
+
+// Runaway-script wall-clock deadline (see gc.h).
+long long g_jsDeadlineMs = 0;
+long long JsNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // ── JsValue::toString ─────────────────────────────────────────────────────────
 std::string JsValue::toString() const {

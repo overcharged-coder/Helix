@@ -87,6 +87,7 @@ void Parser::semicolon() {
 Program Parser::parse() {
     Program prog;
     while (!check(TT::Eof)) {
+        size_t before = m_pos;
         try {
             prog.body.push_back(parseStmt());
         } catch (const ParseError& e) {
@@ -95,6 +96,10 @@ Program Parser::parse() {
                 consume();
             match(TT::Semicolon);
         }
+        // Guarantee forward progress. Without this, a stray '}' (which the
+        // recovery loop stops at but does not consume) makes parseStmt re-parse
+        // the same token forever — an infinite loop on malformed input.
+        if (m_pos == before) consume();
     }
     return prog;
 }
@@ -164,8 +169,11 @@ StmtPtr Parser::parseBlock() {
     int ln = line();
     expect(TT::LBrace, "expected '{'");
     BlockStmt blk;
-    while (!check(TT::RBrace) && !check(TT::Eof))
+    while (!check(TT::RBrace) && !check(TT::Eof)) {
+        size_t before = m_pos;
         blk.body.push_back(parseStmt());
+        if (m_pos == before) consume();   // guarantee progress
+    }
     expect(TT::RBrace, "expected '}'");
     return std::make_unique<Stmt>(std::move(blk), ln);
 }

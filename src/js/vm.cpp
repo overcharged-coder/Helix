@@ -772,14 +772,22 @@ JsValue VM::runFrame(CallFrame& frame) {
 }
 
 JsValue VM::execute(BytecodeFunction* fn, JsValue thisVal) {
-    // Start the runaway-script deadline at the outermost execution only.
-    if (m_executeDepth == 0) m_deadlineMs = NowMs() + kScriptBudgetMs;
+    // Start the runaway-script deadline at the outermost execution only. The
+    // deadline is global so native code (GC allocation, DOM/string churn) can
+    // also bail out — not just the bytecode loop.
+    bool top = (m_executeDepth == 0);
+    if (top) { m_deadlineMs = NowMs() + kScriptBudgetMs; g_jsDeadlineMs = m_deadlineMs; }
     ++m_executeDepth;
     std::vector<JsValue> noArgs;
     std::vector<Upvalue*> noUpvals;
     JsValue r;
     try { r = callBytecode(fn, thisVal, noArgs, false, noUpvals); }
-    catch (...) { --m_executeDepth; throw; }
+    catch (...) {
+        --m_executeDepth;
+        if (top) g_jsDeadlineMs = 0;
+        throw;
+    }
     --m_executeDepth;
+    if (top) g_jsDeadlineMs = 0;
     return r;
 }
