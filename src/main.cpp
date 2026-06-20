@@ -16,6 +16,31 @@
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <mutex>
+#include <condition_variable>
+
+// A tiny counting semaphore (C++17 has no std::counting_semaphore). Caps how
+// many image fetches run at once: firing ~50 simultaneous requests at a host
+// like Wikimedia gets the burst rate-limited (HTTP 429), so most images fail.
+class Semaphore {
+public:
+    explicit Semaphore(int count) : m_count(count) {}
+    void acquire() {
+        std::unique_lock<std::mutex> lk(m_mu);
+        m_cv.wait(lk, [&] { return m_count > 0; });
+        --m_count;
+    }
+    void release() {
+        { std::lock_guard<std::mutex> lk(m_mu); ++m_count; }
+        m_cv.notify_one();
+    }
+private:
+    std::mutex m_mu;
+    std::condition_variable m_cv;
+    int m_count;
+};
+// ~6 matches a typical browser's per-host connection limit.
+static Semaphore g_imageFetchGate(6);
 
 // ─── control IDs ─────────────────────────────────────────────────────────────
 enum : int { IDC_BACK = 101, IDC_FWRD, IDC_REFR, IDC_STOP, IDC_HOME, IDC_URL, IDC_FIND };
@@ -44,6 +69,7 @@ struct PageMsg {
 
 struct Tab {
     std::string           url      = "helix://home";
+    std::string           displayUrl;   // shown in URL bar (e.g. search query, not the bing URL)
     std::string           title    = "Helix";
     std::shared_ptr<Page> page;
     float                 scrollY  = 0.f;
@@ -103,6 +129,9 @@ static std::string LowerAscii(std::string s) {
 }
 static void SetUrlBar(const std::string& url) {
     SetWindowTextW(g_hwndUrl, ToWide(url).c_str());
+}
+static void SetUrlBarForTab(const Tab& tab) {
+    SetUrlBar(tab.displayUrl.empty() ? tab.url : tab.displayUrl);
 }
 static void SetStatus(const std::string& s) {
     SetWindowTextW(g_hwndStatus, ToWide(s).c_str());
@@ -304,6 +333,7 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
     if (tab.loading) return;
 
     std::string url = rawUrl;
+    tab.displayUrl.clear();
 
     // ── built-in: home ──────────────────────────────────────────────────
     if (url.empty() || url == "helix://home" || url == "felix://home") {
@@ -352,18 +382,21 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
     }
 
     // If it's a URL, ensure it has a scheme; otherwise treat it as a search
-    // query and route it to a search engine (DuckDuckGo's no-JS HTML endpoint,
-    // which renders without a full JS stack).
+    // query and route it to Bing's server-rendered results page.
+    std::string displayUrl = url;
     if (LooksLikeUrl(url)) {
         if (url.find("://") == std::string::npos)
             url = "https://" + url;
+        displayUrl = url;
     } else {
-        url = "https://html.duckduckgo.com/html/?q=" + UrlEncodeQuery(url);
+        displayUrl = url;
+        url = "https://www.bing.com/search?q=" + UrlEncodeQuery(url);
     }
 
-    tab.loading = true;
-    tab.url     = url;
-    tab.title   = "Loading…";
+    tab.loading    = true;
+    tab.url        = url;
+    tab.displayUrl = displayUrl;
+    tab.title      = "Loading…";
     tab.pendingFragment = UrlFragment(url);
     tab.fragmentScrollPending = !tab.pendingFragment.empty();
     if (pushHistory) TabPushHistory(tab, url);
@@ -371,7 +404,7 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
     if (tabIdx == g_activeTab) {
         EnableWindow(g_hwndStop, TRUE);
         EnableWindow(g_hwndRefr, FALSE);
-        SetUrlBar(url);
+        SetUrlBar(displayUrl);
         UpdateTitle();
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
@@ -427,7 +460,7 @@ static void CloseTab(int idx) {
     g_tabs.erase(g_tabs.begin() + idx);
     if (g_activeTab >= (int)g_tabs.size())
         g_activeTab = (int)g_tabs.size() - 1;
-    SetUrlBar(CurTab().url);
+    SetUrlBarForTab(CurTab());
     UpdateTitle();
     UpdateScrollbar();
     InvalidateRect(g_hwnd, NULL, FALSE);
@@ -437,7 +470,7 @@ static void SwitchTab(int idx) {
     if (idx < 0 || idx >= (int)g_tabs.size()) return;
     g_activeTab = idx;
     const Tab& tab = CurTab();
-    SetUrlBar(tab.url);
+    SetUrlBarForTab(tab);
     UpdateTitle();
     if (tab.loading) {
         EnableWindow(g_hwndStop, TRUE);
@@ -567,7 +600,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         g_renderer.SetImageRequestCallback([hwnd](std::string url) {
             std::thread([hwnd, url]() {
+                g_imageFetchGate.acquire();
                 auto res = FetchUrl(url);
+                g_imageFetchGate.release();
                 if (res.success && !res.body.empty()) {
                     auto* m = new ImageMsg;
                     m->url   = url;
@@ -654,7 +689,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (idx == g_activeTab) {
             EnableWindow(g_hwndStop, FALSE);
             EnableWindow(g_hwndRefr, TRUE);
-            SetUrlBar(CurTab().url);
+            SetUrlBarForTab(CurTab());
             UpdateTitle();
             ClampScroll();
             UpdateScrollbar();
