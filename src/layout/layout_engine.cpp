@@ -99,6 +99,20 @@ bool TagIsReplacedImage(const Node* n, const std::string& baseUrl, std::string& 
     const std::string& tag = n->tagName;
     if (tag == "img") {
         std::string src = n->attr("src");
+        // Responsive / lazy images often carry the real URL only in srcset or
+        // data-src; fall back to those so they aren't left blank.
+        if (src.empty()) src = n->attr("data-src");
+        if (src.empty()) {
+            // srcset = "url1 1x, url2 2x" or "url1 480w, url2 800w" — take the
+            // first candidate's URL (the part before the first space).
+            std::string ss = n->attr("srcset");
+            if (ss.empty()) ss = n->attr("data-srcset");
+            size_t a = ss.find_first_not_of(" \t\n");
+            if (a != std::string::npos) {
+                size_t b = ss.find_first_of(" \t\n,", a);
+                src = ss.substr(a, b == std::string::npos ? std::string::npos : b - a);
+            }
+        }
         if (src.empty()) return false;
         urlOut = ResolveUrlAgainstBase(src, baseUrl);
         return true;
@@ -374,7 +388,16 @@ std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& paren
                 box->intrinsicW = iw; box->intrinsicH = ih;
             } else {
                 bc.measure->RequestImage(imgUrl);
-                box->intrinsicW = 0; box->intrinsicH = 0;
+                // Reserve space from the width/height attributes so layout is
+                // stable while images stream in (avoids a relayout storm and
+                // keeps replaced boxes from collapsing to 0×0 mid-load).
+                auto attrPx = [&](const char* a) -> float {
+                    std::string v = node->attr(a);
+                    if (v.empty()) return 0.f;
+                    try { return (float)std::stof(v); } catch (...) { return 0.f; }
+                };
+                box->intrinsicW = attrPx("width");
+                box->intrinsicH = attrPx("height");
             }
         }
         if (formControl) {
@@ -518,7 +541,8 @@ struct Engine {
     }
 
     // ── forward decls ────────────────────────────────────────────────────────
-    void layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut);
+    void layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut,
+                             struct FloatCtx* inherited = nullptr);
     void layoutTable(LayoutBox& box);
     float layoutInline(LayoutBox& box, struct FloatCtx* fctx);
     void layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
@@ -569,6 +593,19 @@ float collapseMargins(float a, float b) {
     if (a >= 0 && b >= 0) return std::max(a, b);
     if (a < 0 && b < 0)   return std::min(a, b);
     return a + b;
+}
+
+// A box establishes a *new* block formatting context when it is floated,
+// out-of-flow, a flex/table container, or has non-visible overflow. Such a box
+// does NOT let its ancestors' floats intrude into its content — text inside it
+// must not wrap around an outside float. Everything else inherits intruding
+// floats so paragraphs wrap around a sibling float (e.g. a Wikipedia infobox).
+static bool establishesNewBfc(const ComputedStyle& s) {
+    return s.floatMode != 0
+        || s.positionMode == 2 || s.positionMode == 3
+        || s.isDisplayFlex() || s.isDisplayInlineBlock()
+        || s.isDisplayTableCell()
+        || s.overflowHidden;
 }
 
 // ─── block layout ────────────────────────────────────────────────────────────
@@ -658,12 +695,21 @@ void Engine::layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
         FloatCtx local;
         local.cbLeft = box.contentX();
         local.cbRight = box.contentX() + box.contentW;
+        // Inherit floats that intrude from the parent block formatting context
+        // (e.g. a float:right infobox that is a sibling of this text block) so
+        // line boxes wrap around the float instead of painting over it. All
+        // float geometry is document-absolute, so it composes directly.
+        if (parentFloats && !establishesNewBfc(s)) {
+            for (const auto& f : parentFloats->floats)
+                if (f.bottom > box.contentY()) local.floats.push_back(f);
+        }
         // Note: box.y must already be set by caller (we use contentY()).
         float h = layoutInline(box, &local);
         box.contentH = explicitH >= 0 ? explicitH : h;
     } else {
         std::vector<LayoutBox*> positioned;
-        layoutBlockChildren(box, positioned);
+        FloatCtx* inherit = (parentFloats && !establishesNewBfc(s)) ? parentFloats : nullptr;
+        layoutBlockChildren(box, positioned, inherit);
         for (auto* p : positioned) positionedOut.push_back(p);
         if (explicitH >= 0) box.contentH = explicitH;
     }
@@ -675,11 +721,21 @@ void Engine::layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
 
 // Lay out the in-flow block-level children of `box`, stacking vertically with
 // margin collapsing and float handling. Sets box.contentH.
-void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut) {
+void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut,
+                                 FloatCtx* inherited) {
     DepthScope _d; if (g_depth > kMaxDepth) return;
     FloatCtx fctx;
     fctx.cbLeft  = box.contentX();
     fctx.cbRight = box.contentX() + box.contentW;
+    // Inherit intruding floats from an ancestor BFC so a float (e.g. an infobox)
+    // keeps excluding content nested inside sibling wrapper blocks. Geometry is
+    // document-absolute. These don't belong to this box, so they must not
+    // stretch its height — track where the owned floats begin.
+    if (inherited) {
+        for (const auto& f : inherited->floats)
+            if (f.bottom > box.contentY()) fctx.floats.push_back(f);
+    }
+    const size_t inheritedFloatCount = fctx.floats.size();
 
     float cursorY = box.contentY();
     float prevMarginBottom = 0;
@@ -763,62 +819,137 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
         first = false;
     }
 
-    // Bottom edge includes the last child's bottom margin and any floats.
+    // Bottom edge includes the last child's bottom margin and any floats this
+    // box owns (inherited ancestor floats do not stretch it).
     float contentBottom = cursorY + prevMarginBottom;
-    contentBottom = std::max(contentBottom, fctx.lowestBottom());
+    for (size_t fi = inheritedFloatCount; fi < fctx.floats.size(); ++fi)
+        contentBottom = std::max(contentBottom, fctx.floats[fi].bottom);
     box.contentH = std::max(0.f, contentBottom - box.contentY());
 }
 
-// ─── table layout (simplified) ───────────────────────────────────────────────
-// Lays out cells in rows side-by-side and stacks rows; the table shrinks to fit
-// its content. Direct cell children (no <tr>) form an implicit row — this is
-// what Acid2's display:table <ul> needs, and matches CSS anonymous-row boxes.
+// ─── table layout (auto algorithm) ───────────────────────────────────────────
+// A real fixed-grid auto table layout: column widths are SHARED across rows
+// (so cells line up vertically), each column sizes to its max-content, the
+// table shrinks to fit its content (capped at the available width), and colspan
+// is honoured. Direct cell children with no <tr> form an implicit anonymous row
+// (Acid2's display:table <ul> relies on this).
 void Engine::layoutTable(LayoutBox& box) {
     DepthScope _d; if (g_depth > kMaxDepth) return;
-    float x0 = box.contentX();
-    float y  = box.contentY();
-    float spacing = box.style.borderSpacing >= 0 ? px(box.style.borderSpacing) : 0;
+    const float x0 = box.contentX();
+    const float y0 = box.contentY();
+    const float spacing = box.style.borderSpacing >= 0 ? px(box.style.borderSpacing) : 0;
+    const float avail = box.contentW;  // set by layoutBox (explicit width or fill)
 
+    auto cellSpan = [](LayoutBox* c) {
+        int n = 1;
+        if (c->node) { try { n = std::max(1, std::stoi(c->node->attr("colspan"))); } catch (...) {} }
+        return n;
+    };
+
+    // Group children into rows (explicit <tr>/row-group, or one implicit row).
     std::vector<std::vector<LayoutBox*>> rows;
     std::vector<LayoutBox*> implicit;
+    std::vector<LayoutBox*> rowBoxes;  // parallel to `rows`; nullptr for implicit
     for (auto& k : box.kids) {
         if (k->isOutOfFlow()) continue;
         bool isRow = k->kind == BoxKind::TableRow || k->style.isDisplayTableRow()
                   || k->style.isDisplayTableRowGroup();
         if (isRow) {
-            if (!implicit.empty()) { rows.push_back(implicit); implicit.clear(); }
+            if (!implicit.empty()) { rows.push_back(implicit); rowBoxes.push_back(nullptr); implicit.clear(); }
             std::vector<LayoutBox*> cells;
             for (auto& c : k->kids) if (!c->isOutOfFlow()) cells.push_back(c.get());
-            rows.push_back(cells);
-            k->x = x0; k->y = y;  // row spans the table; geometry filled loosely
+            rows.push_back(std::move(cells));
+            rowBoxes.push_back(k.get());
         } else {
             implicit.push_back(k.get());
         }
     }
-    if (!implicit.empty()) rows.push_back(implicit);
+    if (!implicit.empty()) { rows.push_back(implicit); rowBoxes.push_back(nullptr); }
+    if (rows.empty()) { box.contentW = 0; box.contentH = 0; return; }
 
-    float tableW = 0;
+    // Column count = max sum of colspans across rows.
+    size_t cols = 0;
     for (auto& row : rows) {
-        float x = x0 + spacing;
-        float rowH = 0;
+        size_t c = 0; for (auto* cell : row) c += cellSpan(cell);
+        cols = std::max(cols, c);
+    }
+    if (cols == 0) { box.contentW = 0; box.contentH = 0; return; }
+
+    // Per-column max-content. Single-column cells set their column directly;
+    // spanning cells add a constraint that the spanned columns sum wide enough.
+    std::vector<float> colW(cols, 0.f);
+    for (auto& row : rows) {
+        size_t ci = 0;
         for (auto* cell : row) {
-            std::vector<LayoutBox*> pos;
-            cell->y = y + spacing;
-            // Explicit width honoured by layoutBox; auto width shrinks to fit.
-            layoutBox(*cell, x, box.contentW, -1.f, pos, nullptr, /*shrinkToFit=*/true);
-            rowH = std::max(rowH, cell->borderBoxH());
-            x += cell->marginBoxW() + spacing;
+            int span = cellSpan(cell);
+            float want = maxContent(*cell) + hExtra(cell->style);
+            if (cell->style.width >= 0) want = px(cell->style.width) + hExtra(cell->style);
+            if (span == 1) {
+                if (ci < cols) colW[ci] = std::max(colW[ci], want);
+            } else {
+                float have = 0; for (int s = 0; s < span && ci + s < cols; ++s) have += colW[ci + s];
+                if (want > have && span > 0) {
+                    float add = (want - have) / span;
+                    for (int s = 0; s < span && ci + s < cols; ++s) colW[ci + s] += add;
+                }
+            }
+            ci += span;
         }
-        // Stretch cells to the row height.
-        for (auto* cell : row) {
+    }
+
+    float natural = spacing;
+    for (float w : colW) natural += w + spacing;
+
+    // Auto width → shrink to content (capped at available). Explicit/percent
+    // width → fill the resolved width, distributing slack across columns.
+    bool autoWidth = !(box.style.width >= 0 || box.style.widthPercent >= 0);
+    float targetW = autoWidth ? std::min(natural, avail) : std::max(avail, 0.f);
+    if (natural > 0.01f && std::abs(targetW - natural) > 0.5f) {
+        float scale = (targetW - spacing * (cols + 1)) /
+                      std::max(0.01f, natural - spacing * (cols + 1));
+        if (scale < 0) scale = 0;
+        for (float& w : colW) w *= scale;
+    }
+
+    std::vector<float> colX(cols, 0.f);
+    { float x = x0 + spacing; for (size_t i = 0; i < cols; ++i) { colX[i] = x; x += colW[i] + spacing; } }
+
+    float y = y0;
+    for (size_t r = 0; r < rows.size(); ++r) {
+        float rowH = 0;
+        size_t ci = 0;
+        for (auto* cell : rows[r]) {
+            int span = cellSpan(cell);
+            float cw = 0;
+            for (int s = 0; s < span && ci + s < cols; ++s)
+                cw += colW[ci + s] + (s > 0 ? spacing : 0);
+            float cx = ci < cols ? colX[ci] : x0 + spacing;
+            cell->y = y + spacing;
+            // Pin the cell to its shared column width (override auto) so columns align.
+            float savedW = cell->style.width;
+            float savedPct = cell->style.widthPercent;
+            cell->style.width = std::max(0.f, cw - hExtra(cell->style)) / std::max(0.01f, Z);
+            cell->style.widthPercent = -1;
+            std::vector<LayoutBox*> pos;
+            layoutBox(*cell, cx, cw, -1.f, pos, nullptr);
+            cell->style.width = savedW;
+            cell->style.widthPercent = savedPct;
+            rowH = std::max(rowH, cell->borderBoxH());
+            ci += span;
+        }
+        for (auto* cell : rows[r]) {
             float extra = rowH - cell->borderBoxH();
             if (extra > 0) cell->contentH += extra;
         }
+        if (rowBoxes[r]) {
+            rowBoxes[r]->x = x0; rowBoxes[r]->y = y;
+            rowBoxes[r]->contentW = targetW; rowBoxes[r]->contentH = rowH;
+        }
         y += rowH + spacing;
-        tableW = std::max(tableW, x - x0);
     }
-    box.contentW = std::max(0.f, tableW);
-    box.contentH = std::max(0.f, y - box.contentY());
+
+    box.contentW = std::max(0.f, targetW);
+    box.contentH = std::max(0.f, y + spacing - y0);
 }
 
 // ─── inline layout ───────────────────────────────────────────────────────────
