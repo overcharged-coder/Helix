@@ -1,4 +1,5 @@
 #include "js/dom_bridge.h"
+#include "html/parser.h"
 #include <algorithm>
 #include <sstream>
 #include <chrono>
@@ -13,6 +14,23 @@
 static void addNative(VM& vm, JsObject* obj, const std::string& name, NativeFn fn) {
     auto* fnObj = vm.gc().newNativeFunction(std::move(fn), name);
     obj->setProp(name, JsValue::object(fnObj));
+}
+
+// ── class-token helpers (for classList) ───────────────────────────────────────
+static std::vector<std::string> classTokens(const std::string& cls) {
+    std::vector<std::string> out;
+    std::istringstream ss(cls);
+    std::string t;
+    while (ss >> t) out.push_back(t);
+    return out;
+}
+static std::string classJoin(const std::vector<std::string>& toks) {
+    std::string s;
+    for (size_t i = 0; i < toks.size(); ++i) { if (i) s += ' '; s += toks[i]; }
+    return s;
+}
+static bool classHas(const std::vector<std::string>& toks, const std::string& t) {
+    return std::find(toks.begin(), toks.end(), t) != toks.end();
 }
 
 // ── Node store ────────────────────────────────────────────────────────────────
@@ -198,6 +216,7 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
     // ── style object ──
     {
         auto* style = vm.gc().newObject(ObjKind::Plain);
+        style->domNode = raw;  // Plain+domNode marks a style obj for the set hook
         // Parse inline style
         const std::string& styleStr = node->attr("style");
         std::istringstream ss(styleStr);
@@ -253,18 +272,49 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         return JsValue::boolean(n->attrs.count(args[0].toString()) > 0);
     });
 
-    // classList
+    // classList — back-pointer to the owner node lets the methods mutate the
+    // real class attribute and trigger relayout (used by show/hide toggles).
     {
         auto* cl = vm.gc().newObject(ObjKind::Plain);
+        cl->domNode = raw;  // owner element, so unwrapNode(thisVal) resolves it
         addNative(vm, cl, "add", NATIVE("classList_add") {
-            Node* n = unwrapNode(thisVal.isObject() ? thisVal : JsValue::undefined());
-            // thisVal is classList, parent is the element — we use domNode stored on parent
-            // classList is on the style obj, we need the node from owner
-            return JsValue::undefined(); // simplified
+            Node* n = unwrapNode(thisVal);
+            if (!n) return JsValue::undefined();
+            auto toks = classTokens(n->attr("class"));
+            for (auto& a : args) { std::string t = a.toString();
+                if (!t.empty() && !classHas(toks, t)) toks.push_back(t); }
+            n->attrs["class"] = classJoin(toks);
+            vm.domDirty = true; if (vm.onDomDirty) vm.onDomDirty();
+            return JsValue::undefined();
         });
-        addNative(vm, cl, "remove", NATIVE("classList_remove") { return JsValue::undefined(); });
-        addNative(vm, cl, "toggle", NATIVE("classList_toggle") { return JsValue::boolean(false); });
-        addNative(vm, cl, "contains", NATIVE("classList_contains") { return JsValue::boolean(false); });
+        addNative(vm, cl, "remove", NATIVE("classList_remove") {
+            Node* n = unwrapNode(thisVal);
+            if (!n) return JsValue::undefined();
+            auto toks = classTokens(n->attr("class"));
+            for (auto& a : args) { std::string t = a.toString();
+                toks.erase(std::remove(toks.begin(), toks.end(), t), toks.end()); }
+            n->attrs["class"] = classJoin(toks);
+            vm.domDirty = true; if (vm.onDomDirty) vm.onDomDirty();
+            return JsValue::undefined();
+        });
+        addNative(vm, cl, "toggle", NATIVE("classList_toggle") {
+            Node* n = unwrapNode(thisVal);
+            if (!n || args.empty()) return JsValue::boolean(false);
+            std::string t = args[0].toString();
+            auto toks = classTokens(n->attr("class"));
+            bool has = classHas(toks, t);
+            bool want = args.size() > 1 ? args[1].toBool() : !has;
+            if (want && !has) toks.push_back(t);
+            else if (!want && has) toks.erase(std::remove(toks.begin(), toks.end(), t), toks.end());
+            n->attrs["class"] = classJoin(toks);
+            vm.domDirty = true; if (vm.onDomDirty) vm.onDomDirty();
+            return JsValue::boolean(want);
+        });
+        addNative(vm, cl, "contains", NATIVE("classList_contains") {
+            Node* n = unwrapNode(thisVal);
+            if (!n || args.empty()) return JsValue::boolean(false);
+            return JsValue::boolean(classHas(classTokens(n->attr("class")), args[0].toString()));
+        });
         obj->setProp("classList", JsValue::object(cl));
     }
 
@@ -516,9 +566,91 @@ JsValue wrapNode(VM& vm, std::shared_ptr<Node> node) {
 
 // ── registerDom ───────────────────────────────────────────────────────────────
 
+// camelCase CSS property → kebab-case (backgroundColor → background-color).
+static std::string cssKebab(const std::string& k) {
+    std::string out;
+    for (char c : k) {
+        if (c >= 'A' && c <= 'Z') { out += '-'; out += (char)(c - 'A' + 'a'); }
+        else out += c;
+    }
+    return out;
+}
+
+// Re-serialize a style object's own CSS properties into the node's style attr.
+static void rebuildStyleAttr(Node* n, JsObject* styleObj) {
+    std::string s;
+    for (const auto& key : styleObj->ownEnumKeys()) {
+        JsValue v = styleObj->getProp(key);
+        if (v.isObject()) continue;             // skip methods like setProperty
+        std::string val = v.toString();
+        if (val.empty()) continue;
+        if (!s.empty()) s += "; ";
+        s += cssKebab(key) + ": " + val;
+    }
+    n->attrs["style"] = s;
+}
+
+// Replace a node's children with the parsed contents of an HTML fragment.
+static void setInnerHtml(Node* parent, const std::string& html) {
+    if (!parent) return;
+    auto doc = ParseHtml(html);
+    std::function<Node*(Node*, const std::string&)> findTag =
+        [&](Node* node, const std::string& tag) -> Node* {
+            for (auto& c : node->children) {
+                if (c->tagName == tag) return c.get();
+                if (Node* r = findTag(c.get(), tag)) return r;
+            }
+            return nullptr;
+        };
+    Node* content = doc.get();
+    if (Node* body = findTag(doc.get(), "body")) content = body;
+    parent->children.clear();
+    for (auto& c : content->children) {
+        c->parent = parent;
+        parent->children.push_back(c);
+    }
+}
+
 void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                  std::function<void()> onRepaint) {
     vm.onDomDirty = onRepaint;
+
+    // Reflect live JS property writes onto the backing DOM node.
+    vm.onDomPropSet = [](JsObject* wrapper, const std::string& key, JsValue val) {
+        Node* n = static_cast<Node*>(wrapper->domNode);
+        if (!n) return;
+        // A Plain object carrying a domNode is the style object (reflect CSS) or
+        // classList (mutated via its own methods, so ignore stray writes here).
+        if (wrapper->kind != ObjKind::DomWrapper) {
+            if (wrapper->hasOwn("toggle")) return;   // classList, not a style obj
+            rebuildStyleAttr(n, wrapper);
+            return;
+        }
+        if (key == "className" || key == "class") n->attrs["class"] = val.toString();
+        else if (key == "id")    n->attrs["id"] = val.toString();
+        else if (key == "value") n->attrs["value"] = val.toString();
+        else if (key == "textContent" || key == "innerText") {
+            n->children.clear();
+            std::string t = val.toString();
+            if (!t.empty()) n->appendChild(Node::makeText(t));
+        } else if (key == "innerHTML") {
+            setInnerHtml(n, val.toString());
+        }
+    };
+
+    // Symmetric live getter: keep className/id/value reads in sync with the node
+    // after classList/setAttribute mutations (a stale snapshot otherwise clobbers
+    // on read-modify-write, e.g. el.className += ' x').
+    vm.onDomPropGet = [&vm](JsObject* wrapper, const std::string& key, JsValue& out) -> bool {
+        if (wrapper->kind != ObjKind::DomWrapper) return false;
+        Node* n = static_cast<Node*>(wrapper->domNode);
+        if (!n) return false;
+        if (key == "className") { out = vm.str(n->attr("class")); return true; }
+        if (key == "id")        { out = vm.str(n->attr("id"));    return true; }
+        if (key == "value")     { out = vm.str(n->attr("value")); return true; }
+        return false;
+    };
+
     // Release the previous document's wrapper roots before rewrapping.
     for (auto& r : g_wrapperRoots) vm.gc().removeRoot(r.get());
     g_wrapperRoots.clear();

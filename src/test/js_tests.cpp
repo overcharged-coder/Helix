@@ -79,8 +79,45 @@ static std::string RunEngineDeepDomRegistrationSnapshot() {
     return ok ? "registered\n" : "script failed\n";
 }
 
+static Node* FindByTag(Node* n, const std::string& tag) {
+    if (!n) return nullptr;
+    if (n->tagName == tag) return n;
+    for (auto& c : n->children)
+        if (Node* r = FindByTag(c.get(), tag)) return r;
+    return nullptr;
+}
+
+// Run a script against a tiny DOM, then read back the <p> node's attributes to
+// prove that className / classList / style / textContent writes mutate the real
+// DOM (not just the JS wrapper).
+static std::string RunDomReflectionSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body><p id=\"t\" class=\"a\">Hi</p></body></html>");
+    engine.setDocument(dom, []() {});
+    bool ok = engine.runScript(
+        "var el = document.getElementById('t');\n"
+        "el.classList.add('b');\n"
+        "el.classList.remove('a');\n"
+        "el.className += ' c';\n"
+        "el.style.display = 'none';\n"
+        "el.textContent = 'Bye';\n", "reflection");
+    if (!ok) return "script failed\n";
+    Node* p = FindByTag(dom.get(), "p");
+    if (!p) return "no p\n";
+    std::string text;
+    for (auto& c : p->children) if (c->type == NodeType::Text) text += c->text;
+    return "class=" + p->attr("class") + " style=" + p->attr("style")
+         + " text=" + text + "\n";
+}
+
 TestResult RunJsTests() {
     TestResult result;
+
+    ExpectEqual(
+        "js/dom/property-writes-reflect-to-node",
+        RunDomReflectionSnapshot(),
+        "class=b c style=display: none text=Bye\n",
+        result);
 
     ExpectJsResult(
         "object/static-property",

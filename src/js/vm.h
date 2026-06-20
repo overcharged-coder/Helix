@@ -80,6 +80,17 @@ public:
     // Callback to request animation frame / repaint.
     std::function<void()> onDomDirty;
 
+    // Reflect a JS property write onto the backing DOM node (installed by the
+    // DOM bridge). Called for writes to any object with a domNode so that
+    // el.className / id / innerHTML / textContent / value / style mutate the
+    // real DOM, not just the wrapper's JS property.
+    std::function<void(JsObject*, const std::string&, JsValue)> onDomPropSet;
+
+    // Live-read a DOM property from the backing node (className, id, value, …).
+    // Returns true and fills `out` when it handles the key; false to fall back
+    // to the wrapper's stored property. Keeps getters in sync after mutations.
+    std::function<bool(JsObject*, const std::string&, JsValue&)> onDomPropGet;
+
 private:
     GC&      m_gc;
     JsObject* m_globals;

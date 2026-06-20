@@ -53,6 +53,11 @@ JsValue VM::makeError(const std::string& type, const std::string& msg) {
 JsValue VM::getProp(JsValue obj, const std::string& key) {
     if (obj.isObject()) {
         auto* o = obj.asObject();
+        // Live DOM reads (className/id/value/…) win over the stored snapshot.
+        if (o->domNode && onDomPropGet) {
+            JsValue out;
+            if (onDomPropGet(o, key, out)) return out;
+        }
         // Check own + proto chain via JsObject::getProp
         JsValue v = o->getProp(key);
         if (!v.isUndefined()) return v;
@@ -110,7 +115,12 @@ JsValue VM::getProp(JsValue obj, JsValue key) {
 }
 
 void VM::setProp(JsValue obj, const std::string& key, JsValue val) {
-    if (obj.isObject()) obj.asObject()->setProp(key, val);
+    if (obj.isObject()) {
+        auto* o = obj.asObject();
+        o->setProp(key, val);
+        // Reflect live DOM properties (className, id, innerHTML, …) onto the node.
+        if (o->domNode && onDomPropSet) onDomPropSet(o, key, val);
+    }
 }
 
 void VM::setProp(JsValue obj, JsValue key, JsValue val) {
