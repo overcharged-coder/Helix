@@ -248,6 +248,32 @@ static std::string ExtractTitle(const Node* root) {
     return find(root);
 }
 
+// ─── address-bar input: URL vs. search query ──────────────────────────────────
+// Percent-encode a search query for a URL.
+static std::string UrlEncodeQuery(const std::string& s) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += (char)c;
+        else if (c == ' ') out += '+';
+        else { out += '%'; out += hex[c >> 4]; out += hex[c & 0xF]; }
+    }
+    return out;
+}
+
+// Decide whether address-bar text is a URL to visit or a search query.
+static bool LooksLikeUrl(const std::string& s) {
+    if (s.empty()) return false;
+    if (s.find("://") != std::string::npos) return true;          // has scheme
+    if (s.rfind("helix://", 0) == 0 || s.rfind("about:", 0) == 0) return true;
+    if (s.find(' ') != std::string::npos) return false;           // a space → search
+    if (s == "localhost" || s.rfind("localhost:", 0) == 0) return true;
+    size_t dot = s.find('.');
+    if (dot == std::string::npos) return false;                   // no dot → search
+    if (dot == 0 || dot == s.size() - 1) return false;            // ".x" / "x." → search
+    return true;                                                  // looks like a domain
+}
+
 // ─── navigation ──────────────────────────────────────────────────────────────
 static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory = true);
 static void Navigate(const std::string& rawUrl, bool push = true) {
@@ -325,8 +351,15 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
         return;
     }
 
-    if (url.find("://") == std::string::npos)
-        url = "https://" + url;
+    // If it's a URL, ensure it has a scheme; otherwise treat it as a search
+    // query and route it to a search engine (DuckDuckGo's no-JS HTML endpoint,
+    // which renders without a full JS stack).
+    if (LooksLikeUrl(url)) {
+        if (url.find("://") == std::string::npos)
+            url = "https://" + url;
+    } else {
+        url = "https://html.duckduckgo.com/html/?q=" + UrlEncodeQuery(url);
+    }
 
     tab.loading = true;
     tab.url     = url;
