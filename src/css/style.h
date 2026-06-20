@@ -75,6 +75,8 @@ struct ComputedStyle {
     bool     floatInherit = false;
     int      clearMode    = 0;       // 0=none, 1=left, 2=right, 3=both
     int      positionMode = 0;       // 0=static, 1=relative, 2=absolute, 3=fixed
+    int      zIndex       = 0;
+    bool     zIndexSet    = false;
     bool     overflowHidden = false;
     bool     overflowSet    = false;
     float    top          = 0;
@@ -94,12 +96,16 @@ struct ComputedStyle {
     // Border-spacing
     float    borderSpacing    = -1;
 
-    bool isDisplayNone()      const { return display == 3; }
-    bool isDisplayBlock()     const { return display == 1; }
-    bool isDisplayInline()    const { return display == 2; }
-    bool isDisplayFlex()      const { return display == 4; }
-    bool isDisplayTable()     const { return display == 5; }
-    bool isDisplayTableCell() const { return display == 6; }
+    bool isDisplayNone()        const { return display == 3; }
+    bool isDisplayBlock()       const { return display == 1; }
+    bool isDisplayInline()      const { return display == 2; }
+    bool isDisplayFlex()        const { return display == 4; }
+    bool isDisplayTable()       const { return display == 5; }
+    bool isDisplayTableCell()   const { return display == 6; }
+    bool isDisplayInlineBlock() const { return display == 7; }
+    bool isDisplayListItem()    const { return display == 8; }
+    bool isDisplayTableRow()    const { return display == 9; }
+    bool isDisplayTableRowGroup() const { return display == 10; }
     bool marginTopSet()       const { return marginTop    > kCssNotSet + 1.f; }
     bool marginRightSet()     const { return marginRight  > kCssNotSet + 1.f; }
     bool marginBottomSet()    const { return marginBottom > kCssNotSet + 1.f; }
@@ -159,6 +165,7 @@ struct ComputedStyle {
         if (child.floatInherit)      out.floatInherit = true;
         if (child.clearMode    != 0) out.clearMode = child.clearMode;
         if (child.positionMode != 0) out.positionMode = child.positionMode;
+        if (child.zIndexSet) { out.zIndex = child.zIndex; out.zIndexSet = true; }
         if (child.overflowSet)  { out.overflowHidden = child.overflowHidden; out.overflowSet = true; }
         if (child.topSet)    { out.top    = child.top;    out.topSet    = true; }
         if (child.rightSet)  { out.right  = child.right;  out.rightSet  = true; }

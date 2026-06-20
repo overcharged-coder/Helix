@@ -12,6 +12,7 @@ add_library(helix_engine STATIC
     src/html/serializer.cpp
     src/css/stylesheet.cpp
     src/layout/layout.cpp
+    src/layout/layout_engine.cpp
     src/paint/display_list.cpp
     src/js/gc.cpp
     src/js/lexer.cpp
@@ -35,6 +36,7 @@ endif()
 add_executable(Helix WIN32
     src/main.cpp
     src/render/renderer.cpp
+    src/render/box_paint.cpp
 )
 
 target_include_directories(Helix PRIVATE src)

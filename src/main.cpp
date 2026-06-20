@@ -5,6 +5,7 @@
 #include "network/fetcher.h"
 #include "network/url.h"
 #include "html/parser.h"
+#include "layout/scroll.h"
 #include "render/renderer.h"
 #include "js/engine.h"
 
@@ -347,14 +348,19 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
     std::thread([hwnd, url, fetchUrl, tabIdx]() {
         auto* p = new Page;
         p->url   = url;
-        auto res = FetchUrl(fetchUrl);
-        if (res.success) {
-            p->dom = ParseHtml(res.body);
-            if (!res.finalUrl.empty() && res.finalUrl != url)
-                p->url = res.finalUrl;
-            LoadExternalStylesheets(p->dom, p->url);
-        } else {
-            p->error = res.error;
+        try {
+            auto res = FetchUrl(fetchUrl);
+            if (res.success) {
+                p->dom = ParseHtml(res.body);
+                if (!res.finalUrl.empty() && res.finalUrl != url)
+                    p->url = res.finalUrl;
+                LoadExternalStylesheets(p->dom, p->url);
+            } else {
+                p->error = res.error;
+            }
+        } catch (...) {
+            p->dom.reset();
+            p->error = "Failed to load page (internal error).";
         }
         auto* pm = new PageMsg{ tabIdx, p };
         PostMessageW(hwnd, WM_PAGE_READY, 0, (LPARAM)pm);
@@ -572,6 +578,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 float anchorY = 0.f;
                 if (!cur.pendingFragment.empty()
                     && g_renderer.GetAnchorY(cur.pendingFragment, anchorY)) {
+                    cur.docHeight = FragmentReachableDocumentHeight(
+                        cur.docHeight, anchorY, (float)ViewportH());
                     cur.scrollY = std::max(0.f, anchorY - 16.f);
                     ClampScroll();
                     repaintForFragment = true;
@@ -617,6 +625,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             UpdateTitle();
             ClampScroll();
             UpdateScrollbar();
+
         }
 
         // Run <script> tags in the loaded page

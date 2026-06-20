@@ -1,4 +1,5 @@
 #include "render/renderer.h"
+#include "layout/layout_engine.h"
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -237,6 +238,8 @@ Renderer::~Renderer() {
     auto r = [](auto*& p) { if (p) { p->Release(); p = nullptr; } };
     r(m_fmtBody); r(m_fmtBold); r(m_fmtItalic);
     r(m_fmtCode); r(m_fmtH1);   r(m_fmtH2); r(m_fmtH3); r(m_fmtTab);
+    for (auto& [k, f] : m_fmtCache) if (f) f->Release();
+    m_fmtCache.clear();
     r(m_dwrite); r(m_wic); r(m_factory);
 }
 
@@ -248,6 +251,10 @@ void Renderer::Resize(UINT w, UINT h) {
 void Renderer::SetZoom(float z) {
     m_zoom = std::max(0.5f, std::min(3.f, z));
     if (m_dwrite) RecreateFormats();
+    // Cached text formats/measurements are size-dependent — invalidate them.
+    for (auto& [k, f] : m_fmtCache) if (f) f->Release();
+    m_fmtCache.clear();
+    m_measureCache.clear();
 }
 
 // ─── image loading ────────────────────────────────────────────────────────────
@@ -723,8 +730,51 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
 
     auto walkChildren = [&]() {
         paintGeneratedPseudo("before");
+        if (cs.positionMode == 1) {
+            struct PositionedChild { const Node* node; PaintCtx start; };
+            std::vector<PositionedChild> positioned;
+            for (auto& child : node->children) {
+                if (child->type == NodeType::Element && ctx.sheet) {
+                    ComputedStyle childStyle = ctx.sheet->resolve(child.get());
+                    if (childStyle.positionMode == 2 || childStyle.positionMode == 3) {
+                        // Positioned descendants participate in the containing
+                        // block's geometry but paint after its normal-flow layers.
+                        PaintCtx measure = ctx;
+                        measure.dryRun = true;
+                        WalkNode(child.get(), measure);
+                        positioned.push_back({ child.get(), ctx });
+                        continue;
+                    }
+                }
+                WalkNode(child.get(), ctx);
+            }
+            for (const auto& child : positioned) {
+                PaintCtx paint = child.start;
+                WalkNode(child.node, paint);
+            }
+            paintGeneratedPseudo("after");
+            return;
+        }
         if (cs.positionMode != 2 && cs.positionMode != 3) {
-            for (auto& c : node->children) WalkNode(c.get(), ctx);
+            struct OverlayChild { const Node* node; PaintCtx start; int zIndex; };
+            std::vector<OverlayChild> overlays;
+            for (auto& c : node->children) {
+                PaintCtx start = ctx;
+                WalkNode(c.get(), ctx);
+                if (!ctx.dryRun && c->type == NodeType::Element && ctx.sheet) {
+                    ComputedStyle childStyle = ctx.sheet->resolve(c.get());
+                    if (childStyle.zIndexSet && childStyle.zIndex > 0)
+                        overlays.push_back({ c.get(), start, childStyle.zIndex });
+                }
+            }
+            // Preserve normal-flow layout, then repaint positive stacking
+            // contexts above auto/zero layers in z-index order.
+            std::stable_sort(overlays.begin(), overlays.end(),
+                [](const OverlayChild& a, const OverlayChild& b) { return a.zIndex < b.zIndex; });
+            for (const auto& overlay : overlays) {
+                PaintCtx paintCtx = overlay.start;
+                WalkNode(overlay.node, paintCtx);
+            }
             paintGeneratedPseudo("after");
             return;
         }
@@ -1457,10 +1507,11 @@ float Renderer::WalkNode(const Node* node, PaintCtx& ctx) {
 
         if (didClip) m_rt->PopAxisAlignedClip();
 
-        // Enforce min/max height constraints
+        // A specified CSS height defines the box's used height. Descendants may
+        // paint outside it when overflow is visible, but they must not enlarge
+        // the normal-flow slot (Acid2's zero-height eye line relies on this).
         if (explicitH >= 0) {
-            float minEnd = boxStartY + bwTop + pTop + explicitH;
-            if (ctx.y < minEnd) ctx.y = minEnd;
+            ctx.y = boxStartY + bwTop + pTop + explicitH;
         }
         if (maxH >= 0) {
             float maxEnd = boxStartY + bwTop + pTop + maxH;
@@ -1616,7 +1667,7 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
     for (auto* f : m_tempFormats) if (f) f->Release();
     m_tempFormats.clear();
     m_hits.clear();
-    m_anchorY.clear();
+    // m_anchorY is rebuilt only when the layout tree is rebuilt (see below).
 
     m_rt->BeginDraw();
 
@@ -1641,24 +1692,45 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
         DrawTabStrip(*tabs, tabStripH);
 
     if (doc) {
-        PaintCtx ctx;
-        ctx.y        = 0.f;
-        ctx.x        = 0.f;
-        ctx.contentW = std::max(100.f, (float)m_width);
-        ctx.containingBlockX = 0.f;
-        ctx.containingBlockY = 0.f;
-        ctx.containingBlockW = ctx.contentW;
-        ctx.absMaxY          = 0.f;
-        ctx.scrollY  = scrollY;
-        ctx.winH     = (float)m_height;
-        ctx.topInset = topInset;
-        ctx.baseUrl  = baseUrl;
-        ctx.sheet    = &sheet;
-        WalkNode(doc.get(), ctx);
+        m_curBaseUrl = baseUrl;
+        float docH = 0.f;
+        // A malformed or pathological page must never take down the browser.
+        try {
+            // Rebuild the layout tree only when something that affects geometry
+            // changed; scrolling reuses the cached tree.
+            bool reuse = m_layoutRoot
+                      && m_layoutDocKey  == doc.get()
+                      && m_layoutWKey    == m_width
+                      && m_layoutHKey    == m_height
+                      && m_layoutZoomKey == m_zoom;
+            if (!reuse) {
+                LayoutInput in;
+                in.document  = doc.get();
+                in.sheet     = &sheet;
+                in.measure   = this;
+                in.viewportW = std::max(100.f, (float)m_width);
+                in.viewportH = std::max(100.f, (float)m_height - topInset);
+                in.zoom      = m_zoom;
+                in.baseUrl   = baseUrl;
+                m_layoutRoot   = LayoutDocument(in);
+                m_layoutDocKey = doc.get();
+                m_layoutWKey   = m_width;
+                m_layoutHKey   = m_height;
+                m_layoutZoomKey= m_zoom;
+                m_anchorY.clear();
+                if (m_layoutRoot) CollectAnchors(*m_layoutRoot);
+            }
+            if (m_layoutRoot) {
+                PaintBox(*m_layoutRoot, scrollY, topInset, false);
+                docH = m_layoutRoot->contentH + 32.f;
+            }
+        } catch (...) {
+            // swallow — render what we have, keep the browser alive
+        }
 
         HRESULT hr = m_rt->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) ReleaseTarget();
-        return ctx.y + 32.f;
+        return docH;
     }
 
     m_rt->EndDraw();

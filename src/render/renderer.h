@@ -1,6 +1,7 @@
 #pragma once
 #include "html/dom.h"
 #include "css/stylesheet.h"
+#include "layout/box.h"
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -22,12 +23,18 @@ struct TabEntry {
     bool         loading = false;
 };
 
-class Renderer {
+class Renderer : public ITextMeasure {
 public:
     ~Renderer();
 
     bool Init(HWND hwnd);
     void Resize(UINT width, UINT height);
+
+    // ── ITextMeasure (used by the layout engine) ──────────────────────────
+    float MeasureText(const std::wstring& s, const FontKey& f) override;
+    float SpaceWidth(const FontKey& f) override;
+    bool  ImageIntrinsic(const std::string& url, float& w, float& h) override;
+    void  RequestImage(const std::string& url) override;
 
     // Paint everything. Returns total document height (for scrollbar).
     float Paint(const std::shared_ptr<Node>& doc,
@@ -89,6 +96,7 @@ private:
     float m_zoom = 1.f;
 
     std::wstring m_searchQuery;
+    std::string  m_curBaseUrl;   // base URL for the page currently being painted
 
     std::map<std::string, ID2D1Bitmap*> m_images;
     std::set<std::string>               m_loadingImages;
@@ -154,6 +162,23 @@ private:
 
     float WalkNode(const Node* node, PaintCtx& ctx);
     IDWriteTextFormat* FormatFor(const PaintCtx& ctx) const;
+
+    // ── box-tree painter (new layout engine) ──────────────────────────────
+    void PaintBox(const LayoutBox& box, float scrollY, float topInset, bool underFixed);
+    void PaintLines(const LayoutBox& box, float scrollY, float topInset, bool underFixed);
+    void PaintBoxDecorations(const LayoutBox& box, float scrollY, float topInset);
+    void CollectAnchors(const LayoutBox& box);
+    IDWriteTextFormat* FormatForKey(const FontKey& f);
+    std::map<std::string, IDWriteTextFormat*> m_fmtCache;
+    std::map<std::wstring, float>             m_measureCache;
+
+    // Cached layout tree — rebuilt only when the document, size, or zoom
+    // changes, so scrolling/repainting is cheap.
+    std::unique_ptr<LayoutBox> m_layoutRoot;
+    const Node* m_layoutDocKey  = nullptr;
+    UINT  m_layoutWKey = 0, m_layoutHKey = 0;
+    float m_layoutZoomKey = 0.f;
+    void InvalidateLayout() { m_layoutRoot.reset(); m_layoutDocKey = nullptr; }
 
     // Returns new y after drawing (or dry-run computing) wrapped text.
     float DrawWrappedText(const std::wstring& text,

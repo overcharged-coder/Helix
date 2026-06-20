@@ -6,8 +6,9 @@
 
 // ─── length parsing ──────────────────────────────────────────────────────────
 
-// Global em base, set when a font-size is parsed in ApplyDeclaration.
-// Reset to 16 at the start of each stylesheet.
+// Temporary parsing base for relative font values.  Rule parsing must restore
+// this after each selector: a declaration on one element never changes the
+// inherited font size of unrelated selectors.
 static float g_emBase = 16.f;
 
 // Parse a CSS length into pixels.  Returns -1 for inherit/auto/none/unknown.
@@ -457,6 +458,11 @@ static void ApplyDeclaration(const std::string& prop,
         else if (v == "flex" || v == "inline-flex" || v == "grid" || v == "inline-grid") out.display = 4;
         else if (v == "table" || v == "inline-table")                  out.display = 5;
         else if (v == "table-cell")                                    out.display = 6;
+        else if (v == "inline-block")                                  out.display = 7;
+        else if (v == "list-item")                                     out.display = 8;
+        else if (v == "table-row")                                     out.display = 9;
+        else if (v == "table-row-group" || v == "table-header-group"
+              || v == "table-footer-group")                            out.display = 10;
     } else if (prop == "margin") {
         std::istringstream vs(val); std::vector<float> v;
         std::string tok;
@@ -676,6 +682,14 @@ static void ApplyDeclaration(const std::string& prop,
         else if (v == "absolute") out.positionMode = 2;
         else if (v == "fixed")    out.positionMode = 3;
         else                      out.positionMode = 0;
+    } else if (prop == "z-index") {
+        std::string v = sLower(sTrim(val));
+        if (v != "auto") {
+            try {
+                out.zIndex = std::stoi(v);
+                out.zIndexSet = true;
+            } catch (...) {}
+        }
     } else if (prop == "overflow" || prop == "overflow-x" || prop == "overflow-y") {
         out.overflowHidden = (sLower(sTrim(val)) == "hidden");
         out.overflowSet = true;
@@ -1185,13 +1199,36 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
 
         if (selectorBlock.empty()) continue;
 
-        // Parse declarations once
+        // CSS declaration order must not decide the unit basis of other
+        // properties.  In particular, `margin: 100em; font: 2em ...` uses the
+        // element's computed font size, not the font that happened to be
+        // current when the margin was parsed.  Resolve font declarations from
+        // the inherited/root basis first, then resolve all remaining lengths
+        // against that element-local basis.
+        const float inheritedEmBase = g_emBase;
+        const auto declarations = SplitDeclarations(declBlock);
         ComputedStyle declStyle;
-        for (const auto& decl : SplitDeclarations(declBlock)) {
+        g_emBase = inheritedEmBase;
+        for (const auto& decl : declarations) {
             size_t colon = decl.find(':');
             if (colon == std::string::npos) continue;
-            ApplyDeclaration(sLower(sTrim(decl.substr(0, colon))),
-                             sTrim(decl.substr(colon+1)), declStyle);
+            const std::string property = sLower(sTrim(decl.substr(0, colon)));
+            if (property == "font" || property == "font-size"
+                || property == "font-family" || property == "font-weight"
+                || property == "font-style") {
+                ApplyDeclaration(property, sTrim(decl.substr(colon+1)), declStyle);
+            }
+        }
+        const float elementEmBase = declStyle.fontSize > 0 ? declStyle.fontSize : inheritedEmBase;
+        g_emBase = elementEmBase;
+        for (const auto& decl : declarations) {
+            size_t colon = decl.find(':');
+            if (colon == std::string::npos) continue;
+            const std::string property = sLower(sTrim(decl.substr(0, colon)));
+            if (property == "font" || property == "font-size"
+                || property == "font-family" || property == "font-weight"
+                || property == "font-style") continue;
+            ApplyDeclaration(property, sTrim(decl.substr(colon+1)), declStyle);
         }
 
         // Each comma-separated selector becomes its own rule
@@ -1205,6 +1242,13 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
             rule.style = declStyle;
             sheet.rules.push_back(rule);
         }
+
+        // `html` provides the root inherited font size.  Other rules are
+        // independent selectors and must not leak their local font basis.
+        if (selectorBlock == "html" || selectorBlock == ":root")
+            g_emBase = elementEmBase;
+        else
+            g_emBase = inheritedEmBase;
     }
     return sheet;
 }
@@ -1268,6 +1312,7 @@ std::string SerializeComputedStyle(const ComputedStyle& style) {
     if (style.positionMode == 1) out << "position=relative ";
     if (style.positionMode == 2) out << "position=absolute ";
     if (style.positionMode == 3) out << "position=fixed ";
+    if (style.zIndexSet) out << "zIndex=" << style.zIndex << " ";
     if (style.overflowHidden)    out << "overflow=hidden ";
     if (style.topSet)    out << "top="    << style.top    << " ";
     if (style.rightSet)  out << "right="  << style.right  << " ";

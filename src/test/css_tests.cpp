@@ -195,5 +195,42 @@ TestResult RunCssTests() {
             result);
     }
 
+    {
+        auto dom = ParseHtml("<html><body><div id=\"cover\"></div></body></html>");
+        auto* node = FindElementById(dom.get(), "cover");
+        auto sheet = ParseStylesheet("#cover { position: relative; z-index: 2; }");
+        std::string actual = node ? SerializeComputedStyle(sheet.resolve(node)) : "missing\n";
+        ExpectEqual("css/cascade/z-index",
+            actual,
+            "position=relative zIndex=2 \n",
+            result);
+    }
+
+    {
+        auto dom = ParseHtml("<html><body><div class=\"picture\"><p id=\"scalp\"></p></div></body></html>");
+        auto* node = FindElementById(dom.get(), "scalp");
+        auto sheet = ParseStylesheet(
+            "html { font: 12px sans-serif; } "
+            ".picture p { position: fixed; top: 9em; left: 11em; }");
+        std::string actual = node ? SerializeComputedStyle(sheet.resolve(node)) : "missing\n";
+        ExpectEqual("css/cascade/acid2-fixed-em-offsets",
+            actual,
+            "position=fixed top=108 left=132 \n",
+            result);
+    }
+
+    {
+        auto dom = ParseHtml("<html><body><h2 id=\"top\">Hello World!</h2></body></html>");
+        auto* node = FindElementById(dom.get(), "top");
+        auto sheet = ParseStylesheet(
+            "html { font: 12px sans-serif; } "
+            "#top { margin: 100em 3em 0; font: 2em/24px sans-serif; }");
+        std::string actual = node ? SerializeComputedStyle(sheet.resolve(node)) : "missing\n";
+        ExpectEqual("css/cascade/em-lengths-use-element-font-size",
+            actual,
+            "fontSize=24 marginTop=2400 marginRight=72 marginBottom=0 marginLeft=72 lineHeight=24 \n",
+            result);
+    }
+
     return result;
 }

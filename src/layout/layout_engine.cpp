@@ -1,0 +1,1096 @@
+#include "layout/layout_engine.h"
+#include "network/url.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <functional>
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helix layout engine
+//
+//  Two phases, driven by LayoutDocument():
+//    1. BuildBoxTree  — turn the styled DOM into a layout box tree, generating
+//                       anonymous boxes and handling display/whitespace.
+//    2. Layout        — block formatting context (vertical stacking, margins,
+//                       widths, floats) + inline formatting context (line boxes,
+//                       text wrapping, replaced/inline-block placement), then a
+//                       positioned-layout pass for absolute/fixed/relative.
+//
+//  All geometry is device px (CSS px * zoom). (x, y) is the border-box origin.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// Recursion-depth guard: real-world pages can nest deeply or (with broken
+// markup) pathologically. Bail out gracefully instead of overflowing the stack.
+thread_local int g_depth = 0;
+constexpr int kMaxDepth = 400;
+struct DepthScope { DepthScope() { ++g_depth; } ~DepthScope() { --g_depth; } };
+
+constexpr float kNormalLH = 1.2f;   // line-height: normal factor
+
+float Ascent(float lineH, float fontSize) {
+    // Distribute the leading half above / half below the em box; place the
+    // baseline ~80% down the em box.
+    float leading = lineH - fontSize;
+    return leading * 0.5f + fontSize * 0.8f;
+}
+
+bool IsSpace(wchar_t c) { return c == L' ' || c == L'\t' || c == L'\n' || c == L'\r' || c == L'\f'; }
+
+std::wstring ToWide(const std::string& s) {
+    std::wstring w;
+    w.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { w += (wchar_t)c; i += 1; }
+        else if ((c >> 5) == 0x6 && i + 1 < s.size()) {
+            w += (wchar_t)(((c & 0x1F) << 6) | (s[i+1] & 0x3F)); i += 2;
+        } else if ((c >> 4) == 0xE && i + 2 < s.size()) {
+            w += (wchar_t)(((c & 0x0F) << 12) | ((s[i+1] & 0x3F) << 6) | (s[i+2] & 0x3F)); i += 3;
+        } else if ((c >> 3) == 0x1E && i + 3 < s.size()) {
+            // surrogate pair
+            unsigned int cp = ((c & 0x07) << 18) | ((s[i+1] & 0x3F) << 12)
+                            | ((s[i+2] & 0x3F) << 6) | (s[i+3] & 0x3F);
+            cp -= 0x10000;
+            w += (wchar_t)(0xD800 + (cp >> 10));
+            w += (wchar_t)(0xDC00 + (cp & 0x3FF));
+            i += 4;
+        } else { w += L'?'; i += 1; }
+    }
+    return w;
+}
+
+// UA default display for an element tag (used when CSS doesn't set display).
+// Returns one of the ComputedStyle display codes (1=block,2=inline,7=inline-block,
+// 8=list-item,5=table,9=table-row,6=table-cell,10=row-group).
+int UaDisplay(const std::string& tag) {
+    // Block-level
+    static const char* blocks[] = {
+        "html","body","div","p","section","article","main","header","footer",
+        "aside","nav","figure","figcaption","blockquote","address","form","fieldset",
+        "details","summary","hr","pre","dl","dt","dd","h1","h2","h3","h4","h5","h6",
+        "ul","ol","center","legend"
+    };
+    for (auto* b : blocks) if (tag == b) return 1;
+    if (tag == "li") return 8;
+    if (tag == "table") return 5;
+    if (tag == "tr") return 9;
+    if (tag == "td" || tag == "th") return 6;
+    if (tag == "thead" || tag == "tbody" || tag == "tfoot") return 10;
+    if (tag == "img" || tag == "input" || tag == "select" || tag == "textarea"
+     || tag == "button" || tag == "object" || tag == "iframe" || tag == "canvas"
+     || tag == "video" || tag == "embed")
+        return 7;  // replaced/atomic → inline-block-ish
+    return 2;       // default inline
+}
+
+bool IsSkippedTag(const std::string& tag) {
+    return tag == "head" || tag == "script" || tag == "style" || tag == "meta"
+        || tag == "link" || tag == "title" || tag == "noscript" || tag == "base"
+        || tag == "template" || tag == "param" || tag == "source" || tag == "track"
+        || tag == "col" || tag == "colgroup";
+}
+
+bool TagIsReplacedImage(const Node* n, const std::string& baseUrl, std::string& urlOut) {
+    if (!n) return false;
+    const std::string& tag = n->tagName;
+    if (tag == "img") {
+        std::string src = n->attr("src");
+        if (src.empty()) return false;
+        urlOut = ResolveUrlAgainstBase(src, baseUrl);
+        return true;
+    }
+    if (tag == "object") {
+        std::string data = n->attr("data");
+        std::string low; for (char c : data) low += (char)std::tolower((unsigned char)c);
+        bool imgish = low.rfind("data:image/", 0) == 0
+            || low.find(".png") != std::string::npos || low.find(".jpg") != std::string::npos
+            || low.find(".jpeg") != std::string::npos || low.find(".gif") != std::string::npos
+            || low.find(".webp") != std::string::npos || low.find(".bmp") != std::string::npos;
+        if (!imgish) return false;
+        urlOut = ResolveUrlAgainstBase(data, baseUrl);
+        return true;
+    }
+    return false;
+}
+
+// ─── inheritance + UA defaults ───────────────────────────────────────────────
+
+void InheritInto(ComputedStyle& s, const ComputedStyle& parent) {
+    if (!s.color.valid && parent.color.valid)            s.color = parent.color;
+    if (s.fontSize <= 0 && parent.fontSize > 0)          s.fontSize = parent.fontSize;
+    if (!s.boldSet && parent.boldSet)   { s.bold = parent.bold;     s.boldSet = true; }
+    if (!s.italicSet && parent.italicSet){ s.italic = parent.italic; s.italicSet = true; }
+    if (s.fontFamily.empty())                            s.fontFamily = parent.fontFamily;
+    if (s.lineHeight <= 0 && parent.lineHeight > 0)      s.lineHeight = parent.lineHeight;
+    if (!s.textAlignSet && parent.textAlignSet) { s.textAlign = parent.textAlign; s.textAlignSet = true; }
+    if (!s.textTransformSet && parent.textTransformSet) { s.textTransform = parent.textTransform; s.textTransformSet = true; }
+    if (!s.whiteSpaceSet && parent.whiteSpaceSet) {
+        s.whiteSpaceNowrap = parent.whiteSpaceNowrap;
+        s.whiteSpacePre = parent.whiteSpacePre; s.whiteSpaceSet = true;
+    }
+    if (!s.visibilitySet && parent.visibilitySet) { s.visibilityHidden = parent.visibilityHidden; s.visibilitySet = true; }
+    if (!s.listStyleSet && parent.listStyleSet)   { s.listStyleNone = parent.listStyleNone; s.listStyleSet = true; }
+    if (parent.underline) s.underline = true;   // text-decoration propagates visually
+}
+
+void ApplyUaDefaults(const std::string& tag, ComputedStyle& s) {
+    auto setSize = [&](float px) { if (s.fontSize <= 0) s.fontSize = px; };
+    auto setBold = [&]() { if (!s.boldSet) { s.bold = true; s.boldSet = true; } };
+    auto setItalic = [&]() { if (!s.italicSet) { s.italic = true; s.italicSet = true; } };
+    auto vMargin = [&](float v) {
+        if (!s.marginTopSet())    s.marginTop = v;
+        if (!s.marginBottomSet()) s.marginBottom = v;
+    };
+    auto setMono = [&]() { if (s.fontFamily.empty()) s.fontFamily = "monospace"; };
+
+    if (tag == "body") {
+        if (!s.marginTopSet())    s.marginTop = 8;
+        if (!s.marginBottomSet()) s.marginBottom = 8;
+        if (!s.marginLeftSet())   s.marginLeft = 8;
+        if (!s.marginRightSet())  s.marginRight = 8;
+    }
+    else if (tag == "h1") { setSize(32); setBold(); vMargin(21); }
+    else if (tag == "h2") { setSize(24); setBold(); vMargin(19); }
+    else if (tag == "h3") { setSize(19); setBold(); vMargin(18); }
+    else if (tag == "h4") { setSize(16); setBold(); vMargin(16); }
+    else if (tag == "h5") { setSize(13); setBold(); vMargin(15); }
+    else if (tag == "h6") { setSize(11); setBold(); vMargin(15); }
+    else if (tag == "p")  { vMargin(14); }
+    else if (tag == "blockquote") { vMargin(14); if (s.marginLeft == kCssNotSet) {} if (!s.marginLeftSet()) s.marginLeft = 40; if (!s.marginRightSet()) s.marginRight = 40; }
+    else if (tag == "figure") { vMargin(14); if (!s.marginLeftSet()) s.marginLeft = 40; if (!s.marginRightSet()) s.marginRight = 40; }
+    else if (tag == "ul" || tag == "ol") { vMargin(14); if (s.paddingLeft < 0) s.paddingLeft = 40; }
+    else if (tag == "dl") { vMargin(14); }
+    else if (tag == "dd") { if (!s.marginLeftSet()) s.marginLeft = 40; }
+    else if (tag == "pre") { vMargin(12); setMono(); s.whiteSpacePre = true; s.whiteSpaceSet = true; }
+    else if (tag == "hr")  { vMargin(8); }
+    else if (tag == "b" || tag == "strong" || tag == "th") { setBold(); }
+    else if (tag == "i" || tag == "em" || tag == "cite" || tag == "var" || tag == "dfn") { setItalic(); }
+    else if (tag == "address") { setItalic(); }
+    else if (tag == "code" || tag == "tt" || tag == "kbd" || tag == "samp") { setMono(); }
+    else if (tag == "small") { if (s.fontSize <= 0) s.fontSize = 13; }
+    else if (tag == "a") { if (!s.underline) s.underline = true; }
+}
+
+// ─── box construction ────────────────────────────────────────────────────────
+
+struct BuildCtx {
+    const Stylesheet* sheet;
+    ITextMeasure*     measure;
+    float             zoom;
+    std::string       baseUrl;
+};
+
+BoxKind KindFromDisplay(int disp, bool replaced) {
+    if (replaced) {
+        // Atomic. block display → still atomic but block-level-positioned.
+        return (disp == 1) ? BoxKind::InlineBlock /*treated as atomic block below*/
+                           : BoxKind::Replaced;
+    }
+    switch (disp) {
+        case 1:  return BoxKind::Block;
+        case 2:  return BoxKind::Inline;
+        case 7:  return BoxKind::InlineBlock;
+        case 8:  return BoxKind::ListItem;
+        case 5:  return BoxKind::Table;
+        case 9:  return BoxKind::TableRow;
+        case 6:  return BoxKind::TableCell;
+        case 10: return BoxKind::Block;  // row group → block
+        default: return BoxKind::Block;
+    }
+}
+
+std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& parentStyle,
+                                    const BuildCtx& bc, const std::string& inheritedHref);
+
+// Build children list (with pseudo-elements and anonymous-box fixup applied
+// by the caller). Whitespace-only text between blocks is dropped later.
+void BuildChildren(const Node* node, const ComputedStyle& style, const BuildCtx& bc,
+                   const std::string& href, std::vector<std::unique_ptr<LayoutBox>>& out) {
+    // ::before
+    // (generated content handled by caller via pseudo nodes — skipped here for brevity)
+    for (auto& child : node->children) {
+        if (child->type == NodeType::Text) {
+            // Whitespace handling: collapse runs of whitespace to single spaces
+            // unless white-space: pre. Empty/whitespace runs become a single space
+            // box (may be dropped during fixup if between blocks).
+            bool pre = style.whiteSpacePre;
+            std::wstring w = ToWide(child->text);
+            if (w.empty()) continue;
+            std::wstring outw;
+            if (pre) {
+                outw = w;
+            } else {
+                bool prevSpace = false;
+                for (wchar_t c : w) {
+                    if (IsSpace(c)) {
+                        if (!prevSpace) { outw += L' '; prevSpace = true; }
+                    } else { outw += c; prevSpace = false; }
+                }
+            }
+            if (outw.empty()) continue;
+            auto tb = std::make_unique<LayoutBox>();
+            tb->kind = BoxKind::Text;
+            tb->anonymous = true;
+            tb->node = node;          // for inherited paint style
+            tb->style = style;        // carries font/color/etc.
+            tb->text = outw;
+            tb->href = href;
+            out.push_back(std::move(tb));
+        } else if (child->type == NodeType::Element) {
+            auto cb = BuildBox(child.get(), style, bc, href);
+            if (cb) out.push_back(std::move(cb));
+        }
+    }
+}
+
+// Apply anonymous block fixup: if `box` (a block container) has any block-level
+// child, wrap each contiguous run of inline-level children in an anonymous block.
+void AnonymousFixup(LayoutBox* box) {
+    bool hasBlock = false, hasInline = false;
+    for (auto& k : box->kids) {
+        if (k->isInlineLevel()) hasInline = true;
+        else hasBlock = true;
+    }
+    if (!hasBlock) {
+        // Pure inline container → establishes an inline formatting context.
+        // Drop leading/trailing whitespace-only text boxes.
+        box->establishesInline = !box->kids.empty();
+        return;
+    }
+    if (!hasInline) return;  // pure block container, nothing to do
+
+    std::vector<std::unique_ptr<LayoutBox>> rebuilt;
+    std::vector<std::unique_ptr<LayoutBox>> run;
+    auto flushRun = [&]() {
+        if (run.empty()) return;
+        // Drop runs that are only whitespace text.
+        bool onlyWs = true;
+        for (auto& r : run) {
+            if (r->kind != BoxKind::Text) { onlyWs = false; break; }
+            for (wchar_t c : r->text) if (!IsSpace(c)) { onlyWs = false; break; }
+            if (!onlyWs) break;
+        }
+        if (onlyWs) { run.clear(); return; }
+        auto anon = std::make_unique<LayoutBox>();
+        anon->kind = BoxKind::Block;
+        anon->anonymous = true;
+        anon->node = box->node;
+        anon->style = box->style;          // inherit font/color
+        anon->establishesInline = true;
+        for (auto& r : run) anon->kids.push_back(std::move(r));
+        run.clear();
+        rebuilt.push_back(std::move(anon));
+    };
+    for (auto& k : box->kids) {
+        if (k->isInlineLevel()) run.push_back(std::move(k));
+        else { flushRun(); rebuilt.push_back(std::move(k)); }
+    }
+    flushRun();
+    box->kids = std::move(rebuilt);
+}
+
+// Generated content: build a ::before / ::after box if a rule sets `content`.
+std::unique_ptr<LayoutBox> BuildPseudo(const Node* el, const char* which,
+                                       const ComputedStyle& parentStyle, const BuildCtx& bc,
+                                       const std::string& href) {
+    if (!bc.sheet) return nullptr;
+    Node tmp;
+    tmp.type = NodeType::Element;
+    tmp.tagName = el->tagName;
+    tmp.attrs = el->attrs;
+    tmp.attrs["_helix_pseudo"] = which;
+    tmp.parent = el->parent;
+    ComputedStyle s = bc.sheet->resolve(&tmp);
+    if (!s.contentSet) return nullptr;
+    InheritInto(s, parentStyle);
+    ApplyUaDefaults(el->tagName, s);
+
+    auto box = std::make_unique<LayoutBox>();
+    box->node = nullptr;
+    box->href = href;
+    box->style = s;
+    int disp = s.display != 0 ? s.display : 2;  // inline by default
+    if (disp == 3) return nullptr;
+    box->kind = KindFromDisplay(disp, false);
+
+    if (!s.content.empty()) {
+        auto t = std::make_unique<LayoutBox>();
+        t->kind = BoxKind::Text; t->anonymous = true; t->style = s;
+        t->text = ToWide(s.content); t->href = href;
+        box->kids.push_back(std::move(t));
+    }
+    if (box->kind == BoxKind::Block || box->kind == BoxKind::InlineBlock
+     || box->kind == BoxKind::ListItem) AnonymousFixup(box.get());
+    else box->establishesInline = !box->kids.empty();
+    return box;
+}
+
+std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& parentStyle,
+                                    const BuildCtx& bc, const std::string& inheritedHref) {
+    if (!node || node->type != NodeType::Element) return nullptr;
+    DepthScope _d; if (g_depth > kMaxDepth) return nullptr;
+    const std::string& tag = node->tagName;
+    if (IsSkippedTag(tag)) return nullptr;
+
+    ComputedStyle s = bc.sheet ? bc.sheet->resolve(node) : ComputedStyle{};
+    if (s.isDisplayNone()) return nullptr;
+    InheritInto(s, parentStyle);
+    ApplyUaDefaults(tag, s);
+
+    // Effective display.
+    int disp = s.display != 0 ? s.display : UaDisplay(tag);
+    if (disp == 3) return nullptr;
+
+    std::string href = inheritedHref;
+    if (tag == "a" && !node->attr("href").empty())
+        href = ResolveUrlAgainstBase(node->attr("href"), bc.baseUrl);
+
+    std::string imgUrl;
+    bool replaced = TagIsReplacedImage(node, bc.baseUrl, imgUrl);
+    bool formControl = (tag == "input" || tag == "textarea" || tag == "select" || tag == "button");
+
+    auto box = std::make_unique<LayoutBox>();
+    box->node = node;
+    box->style = s;
+    box->href = href;
+
+    if (tag == "br") {
+        box->kind = BoxKind::Break;
+        return box;
+    }
+
+    if (replaced || formControl) {
+        // Atomic replaced box. inline-block if not display:block.
+        box->kind = (disp == 1) ? BoxKind::InlineBlock : BoxKind::Replaced;
+        if (disp == 1) box->kind = BoxKind::InlineBlock; // atomic, block-positioned handled by flow
+        box->replacedUrl = imgUrl;
+        if (replaced && bc.measure) {
+            float iw = 0, ih = 0;
+            if (bc.measure->ImageIntrinsic(imgUrl, iw, ih)) {
+                box->intrinsicW = iw; box->intrinsicH = ih;
+            } else {
+                bc.measure->RequestImage(imgUrl);
+                box->intrinsicW = 0; box->intrinsicH = 0;
+            }
+        }
+        if (formControl) {
+            box->intrinsicW = (tag == "textarea") ? 180.f : 140.f;
+            box->intrinsicH = (tag == "textarea") ? 60.f : 22.f;
+        }
+        return box;
+    }
+
+    box->kind = KindFromDisplay(disp, false);
+
+    // Generated content: ::before then real children then ::after.
+    if (auto before = BuildPseudo(node, "before", s, bc, href))
+        box->kids.push_back(std::move(before));
+    BuildChildren(node, s, bc, href, box->kids);
+    if (auto after = BuildPseudo(node, "after", s, bc, href))
+        box->kids.push_back(std::move(after));
+
+    // List items: ensure a marker is accounted for at paint time (no box here).
+    // Block containers / cells / list-items: apply anonymous fixup.
+    if (box->kind == BoxKind::Block || box->kind == BoxKind::ListItem
+     || box->kind == BoxKind::TableCell || box->kind == BoxKind::InlineBlock) {
+        AnonymousFixup(box.get());
+    } else if (box->kind == BoxKind::Inline) {
+        box->establishesInline = false; // inline boxes contribute to parent's IFC
+    } else if (box->kind == BoxKind::Table || box->kind == BoxKind::TableRow) {
+        // tables handled structurally during layout
+    }
+    return box;
+}
+
+// ─── length resolution ───────────────────────────────────────────────────────
+
+struct Engine {
+    const LayoutInput& in;
+    float Z;  // zoom
+
+    explicit Engine(const LayoutInput& i) : in(i), Z(i.zoom) {}
+
+    float px(float cssPx) const { return cssPx * Z; }
+
+    FontKey fontFor(const ComputedStyle& s) const {
+        FontKey f;
+        f.size = px(s.fontSize > 0 ? s.fontSize : 16.f);
+        f.bold = s.bold; f.italic = s.italic;
+        f.family = s.fontFamily;
+        // monospace detection by family name
+        std::string fl; for (char c : s.fontFamily) fl += (char)std::tolower((unsigned char)c);
+        f.mono = (fl.find("consol") != std::string::npos || fl.find("mono") != std::string::npos
+               || fl.find("courier") != std::string::npos);
+        return f;
+    }
+
+    float lineHeightFor(const ComputedStyle& s) const {
+        if (s.lineHeight > 0) return px(s.lineHeight);
+        float fs = px(s.fontSize > 0 ? s.fontSize : 16.f);
+        return fs * kNormalLH;
+    }
+
+    // Resolve used box-model edges (border, padding) for a box, in device px.
+    void resolveEdges(LayoutBox& b) {
+        const ComputedStyle& s = b.style;
+        b.padTop    = s.paddingTop    >= 0 ? px(s.paddingTop)    : 0;
+        b.padRight  = s.paddingRight  >= 0 ? px(s.paddingRight)  : 0;
+        b.padBottom = s.paddingBottom >= 0 ? px(s.paddingBottom) : 0;
+        b.padLeft   = s.paddingLeft   >= 0 ? px(s.paddingLeft)   : 0;
+        float bw = s.borderWidth >= 0 ? s.borderWidth : 0;
+        b.borderTop    = px(s.borderTopWidth    >= 0 ? s.borderTopWidth    : bw);
+        b.borderRight  = px(s.borderRightWidth  >= 0 ? s.borderRightWidth  : bw);
+        b.borderBottom = px(s.borderBottomWidth >= 0 ? s.borderBottomWidth : bw);
+        b.borderLeft   = px(s.borderLeftWidth   >= 0 ? s.borderLeftWidth   : bw);
+    }
+
+    // Resolve a used width value from a CSS length/percentage against `cbW`.
+    // Returns -1 for auto.
+    float usedWidth(const ComputedStyle& s, float cbW) {
+        if (s.widthPercent >= 0) return cbW * (s.widthPercent / 100.f);
+        if (s.width >= 0) return px(s.width);
+        return -1;  // auto
+    }
+    float usedHeight(const ComputedStyle& s, float cbH) {
+        if (s.height >= 0) return px(s.height);
+        if (s.heightPercent >= 0 && cbH >= 0) return cbH * (s.heightPercent / 100.f);
+        return -1;  // auto
+    }
+
+    // Horizontal margin+border+padding of a box, in device px (auto margins → 0).
+    float hExtra(const ComputedStyle& s) {
+        float ml = s.marginLeftSet()  && !s.isMarginAuto(s.marginLeft)  ? px(s.marginLeft)  : 0;
+        float mr = s.marginRightSet() && !s.isMarginAuto(s.marginRight) ? px(s.marginRight) : 0;
+        float pl = s.paddingLeft  >= 0 ? px(s.paddingLeft)  : 0;
+        float pr = s.paddingRight >= 0 ? px(s.paddingRight) : 0;
+        float bw = s.borderWidth >= 0 ? s.borderWidth : 0;
+        float bl = px(s.borderLeftWidth  >= 0 ? s.borderLeftWidth  : bw);
+        float br = px(s.borderRightWidth >= 0 ? s.borderRightWidth : bw);
+        return ml + mr + pl + pr + bl + br;
+    }
+
+    // Max-content width of a box's *content* (device px): the width it would
+    // take if nothing wrapped. Used for shrink-to-fit (float / inline-block /
+    // absolutely positioned with auto width).
+    float maxContent(LayoutBox& box) {
+        DepthScope _d; if (g_depth > kMaxDepth) return 0;
+        const ComputedStyle& s = box.style;
+        if (s.width >= 0) return px(s.width);
+        if (s.widthPercent >= 0) return 0;  // % handled by caller
+
+        if (box.kind == BoxKind::Text) {
+            FontKey f = fontFor(box.style);
+            return in.measure ? in.measure->MeasureText(box.text, f) : (float)box.text.size() * f.size * 0.5f;
+        }
+        if (box.kind == BoxKind::Replaced) {
+            if (box.intrinsicW > 0) return px(box.intrinsicW);
+            return 0;
+        }
+        if (box.establishesInline || box.kind == BoxKind::Inline
+         || box.kind == BoxKind::InlineBlock) {
+            // Inline content sits on one line: sum child outer widths.
+            float sum = 0;
+            for (auto& k : box.kids) sum += maxContent(*k) + hExtra(k->style);
+            return sum;
+        }
+        // Block container: widest child.
+        float w = 0;
+        for (auto& k : box.kids) {
+            if (k->isOutOfFlow()) continue;
+            w = std::max(w, maxContent(*k) + hExtra(k->style));
+        }
+        return w;
+    }
+
+    // ── forward decls ────────────────────────────────────────────────────────
+    void layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut);
+    float layoutInline(LayoutBox& box, struct FloatCtx* fctx);
+    void layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
+                   std::vector<LayoutBox*>& positionedOut, struct FloatCtx* parentFloats,
+                   bool shrinkToFit = false);
+    void layoutPositioned(LayoutBox& root, std::vector<LayoutBox*>& positioned);
+    void collectPositioned(LayoutBox& box, LayoutBox* nearestPositioned,
+                           std::vector<std::pair<LayoutBox*, LayoutBox*>>& out);
+};
+
+// ─── float context ───────────────────────────────────────────────────────────
+
+struct FloatBox { float top, bottom, left, right; int side; };  // side:1 left,2 right
+struct FloatCtx {
+    std::vector<FloatBox> floats;
+    float cbLeft = 0, cbRight = 0;   // BFC content edges
+
+    float leftEdge(float y, float h) const {
+        float e = cbLeft;
+        for (auto& f : floats)
+            if (f.side == 1 && y < f.bottom && (y + h) > f.top) e = std::max(e, f.right);
+        return e;
+    }
+    float rightEdge(float y, float h) const {
+        float e = cbRight;
+        for (auto& f : floats)
+            if (f.side == 2 && y < f.bottom && (y + h) > f.top) e = std::min(e, f.left);
+        return e;
+    }
+    float nextBreakBelow(float y) const {
+        float best = 1e9f;
+        for (auto& f : floats) if (f.bottom > y) best = std::min(best, f.bottom);
+        return best == 1e9f ? y : best;
+    }
+    float clearTo(float y, int clearMode) const {
+        float r = y;
+        for (auto& f : floats) {
+            if (clearMode == 3 || (clearMode == 1 && f.side == 1) || (clearMode == 2 && f.side == 2))
+                r = std::max(r, f.bottom);
+        }
+        return r;
+    }
+    float lowestBottom() const { float r = 0; for (auto& f : floats) r = std::max(r, f.bottom); return r; }
+};
+
+// ─── margin collapsing helper ────────────────────────────────────────────────
+float collapseMargins(float a, float b) {
+    if (a >= 0 && b >= 0) return std::max(a, b);
+    if (a < 0 && b < 0)   return std::min(a, b);
+    return a + b;
+}
+
+// ─── block layout ────────────────────────────────────────────────────────────
+
+// Lay out a single box (any kind) whose border-box top is to be placed by the
+// caller. The caller sets box.x/box.y for the border-box origin BEFORE calling
+// for in-flow blocks (we set x here from cbX + margins). Returns via box fields.
+void Engine::layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
+                       std::vector<LayoutBox*>& positionedOut, FloatCtx* parentFloats,
+                       bool shrinkToFit) {
+    DepthScope _d; if (g_depth > kMaxDepth) { box.contentW = std::max(0.f, cbW); return; }
+    const ComputedStyle& s = box.style;
+    resolveEdges(box);
+
+    // Margins (auto handled for centering below).
+    bool mlAuto = s.isMarginAuto(s.marginLeft);
+    bool mrAuto = s.isMarginAuto(s.marginRight);
+    box.marginTop    = s.marginTopSet()    && !s.isMarginAuto(s.marginTop)    ? px(s.marginTop)    : 0;
+    box.marginBottom = s.marginBottomSet() && !s.isMarginAuto(s.marginBottom) ? px(s.marginBottom) : 0;
+    box.marginLeft   = (s.marginLeftSet()  && !mlAuto) ? px(s.marginLeft)  : 0;
+    box.marginRight  = (s.marginRightSet() && !mrAuto) ? px(s.marginRight) : 0;
+
+    // Resolve width.
+    float w = usedWidth(s, cbW);
+    float bp = box.borderLeft + box.padLeft + box.borderRight + box.padRight;
+    bool isBlockLevel = (box.kind == BoxKind::Block || box.kind == BoxKind::ListItem
+                      || box.kind == BoxKind::Table || box.kind == BoxKind::TableRow
+                      || box.kind == BoxKind::TableCell);
+    bool atomic = (box.kind == BoxKind::InlineBlock || box.kind == BoxKind::Replaced);
+
+    if (w < 0) {
+        if (atomic || shrinkToFit) {
+            float avail = std::max(0.f, cbW - box.marginLeft - box.marginRight - bp);
+            float mc = maxContent(box);
+            w = std::min(mc, avail);
+            if (atomic && box.intrinsicW > 0 && w <= 0) w = px(box.intrinsicW);
+        } else {
+            // block: fill containing block minus margins + borders + padding.
+            w = std::max(0.f, cbW - box.marginLeft - box.marginRight - bp);
+        }
+    }
+    // min/max width clamp.
+    if (s.maxWidth >= 0) w = std::min(w, px(s.maxWidth));
+    if (s.minWidth >= 0) w = std::max(w, px(s.minWidth));
+    box.contentW = w;
+
+    // Auto-margin horizontal centering for block-level with definite width.
+    if (isBlockLevel && (mlAuto || mrAuto)) {
+        float free = cbW - w - bp - box.marginLeft - box.marginRight;
+        if (free < 0) free = 0;
+        if (mlAuto && mrAuto) { box.marginLeft = box.marginRight = free / 2; }
+        else if (mlAuto)      { box.marginLeft = free; }
+        else if (mrAuto)      { box.marginRight = free; }
+    }
+
+    box.x = cbX + box.marginLeft;  // border-box left
+
+    // Replaced: resolve height from intrinsic / CSS, no children.
+    if (box.kind == BoxKind::Replaced) {
+        float h = usedHeight(s, cbH);
+        if (box.intrinsicW > 0 && box.contentW <= 0) box.contentW = px(box.intrinsicW);
+        if (h < 0) {
+            if (box.intrinsicW > 0 && box.intrinsicH > 0 && box.contentW > 0)
+                h = box.contentW * (box.intrinsicH / box.intrinsicW);
+            else h = box.intrinsicH > 0 ? px(box.intrinsicH) : 0;
+        }
+        if (s.maxHeight >= 0) h = std::min(h, px(s.maxHeight));
+        if (s.minHeight >= 0) h = std::max(h, px(s.minHeight));
+        box.contentH = h;
+        return;
+    }
+
+    // Establish inline formatting context or block formatting.
+    float explicitH = usedHeight(s, cbH);
+
+    if (box.establishesInline) {
+        FloatCtx local;
+        local.cbLeft = box.contentX();
+        local.cbRight = box.contentX() + box.contentW;
+        // Note: box.y must already be set by caller (we use contentY()).
+        float h = layoutInline(box, &local);
+        box.contentH = explicitH >= 0 ? explicitH : h;
+    } else {
+        std::vector<LayoutBox*> positioned;
+        layoutBlockChildren(box, positioned);
+        for (auto* p : positioned) positionedOut.push_back(p);
+        if (explicitH >= 0) box.contentH = explicitH;
+    }
+
+    // min/max height clamp on the final content height.
+    if (s.maxHeight >= 0) box.contentH = std::min(box.contentH, px(s.maxHeight));
+    if (s.minHeight >= 0) box.contentH = std::max(box.contentH, px(s.minHeight));
+}
+
+// Lay out the in-flow block-level children of `box`, stacking vertically with
+// margin collapsing and float handling. Sets box.contentH.
+void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut) {
+    DepthScope _d; if (g_depth > kMaxDepth) return;
+    FloatCtx fctx;
+    fctx.cbLeft  = box.contentX();
+    fctx.cbRight = box.contentX() + box.contentW;
+
+    float cursorY = box.contentY();
+    float prevMarginBottom = 0;
+    bool first = true;
+
+    // Special structural handling: TableRow lays children side-by-side.
+    if (box.kind == BoxKind::TableRow) {
+        float x = box.contentX();
+        float maxH = 0;
+        int cells = 0;
+        for (auto& k : box.kids) if (k->kind == BoxKind::TableCell) cells++;
+        for (auto& k : box.kids) {
+            if (k->kind != BoxKind::TableCell) continue;
+            float cellW = k->style.width >= 0 ? px(k->style.width)
+                        : (box.contentW / std::max(1, cells));
+            k->y = cursorY;
+            std::vector<LayoutBox*> pos;
+            layoutBox(*k, x, cellW, -1, pos, &fctx);
+            for (auto* p : pos) positionedOut.push_back(p);
+            maxH = std::max(maxH, k->marginBoxH());
+            x += k->marginBoxW();
+        }
+        // Stretch cells to row height.
+        for (auto& k : box.kids)
+            if (k->kind == BoxKind::TableCell)
+                k->contentH = std::max(k->contentH, maxH - k->borderBoxH() + k->contentH);
+        box.contentH = maxH;
+        return;
+    }
+
+    for (auto& kptr : box.kids) {
+        LayoutBox* k = kptr.get();
+
+        // Out-of-flow: defer to positioned pass.
+        if (k->isOutOfFlow()) { positionedOut.push_back(k); continue; }
+
+        // Float: place on its side at the current y.
+        if (k->isFloat()) {
+            float fy = cursorY;
+            std::vector<LayoutBox*> pos;
+            // Floats with auto width shrink-to-fit their content.
+            layoutBox(*k, box.contentX(), box.contentW, -1.f, pos, &fctx, /*shrinkToFit=*/true);
+            for (auto* p : pos) positionedOut.push_back(p);
+            float fw = k->marginBoxW();
+            // Find a vertical band where the float fits horizontally.
+            float availL = fctx.leftEdge(fy, k->marginBoxH());
+            float availR = fctx.rightEdge(fy, k->marginBoxH());
+            while ((availR - availL) < fw && fctx.nextBreakBelow(fy) > fy) {
+                fy = fctx.nextBreakBelow(fy);
+                availL = fctx.leftEdge(fy, k->marginBoxH());
+                availR = fctx.rightEdge(fy, k->marginBoxH());
+            }
+            if (k->style.floatMode == 1) k->x = availL + k->marginLeft;
+            else                          k->x = availR - k->marginBoxW() + k->marginLeft;
+            k->y = fy + k->marginTop;
+            fctx.floats.push_back({ fy, fy + k->marginBoxH(),
+                                    k->x - k->marginLeft, k->x - k->marginLeft + k->borderBoxW(),
+                                    k->style.floatMode });
+            continue;
+        }
+
+        // Clearance.
+        if (k->style.clearMode != 0) {
+            float cleared = fctx.clearTo(cursorY, k->style.clearMode);
+            if (cleared > cursorY) { cursorY = cleared; prevMarginBottom = 0; }
+        }
+
+        // Resolve this child's top margin for collapsing.
+        float childMTop = k->style.marginTopSet() && !k->style.isMarginAuto(k->style.marginTop)
+                        ? px(k->style.marginTop) : 0;
+        if (first) cursorY += childMTop;                       // (no parent/child collapse)
+        else       cursorY += collapseMargins(prevMarginBottom, childMTop);
+
+        k->y = cursorY;  // border-box top
+        std::vector<LayoutBox*> pos;
+        layoutBox(*k, box.contentX(), box.contentW, -1.f, pos, &fctx);
+        for (auto* p : pos) positionedOut.push_back(p);
+
+        cursorY = k->y + k->borderBoxH();
+        prevMarginBottom = k->marginBottom;
+        first = false;
+    }
+
+    // Bottom edge includes the last child's bottom margin and any floats.
+    float contentBottom = cursorY + prevMarginBottom;
+    contentBottom = std::max(contentBottom, fctx.lowestBottom());
+    box.contentH = std::max(0.f, contentBottom - box.contentY());
+}
+
+// ─── inline layout ───────────────────────────────────────────────────────────
+
+struct InlineItem {
+    enum Type { Word, Space, Atomic, Break } type;
+    std::wstring text;
+    float        width = 0;
+    LayoutBox*   box = nullptr;     // style source (text) or atomic box
+    FontKey      font;
+    float        ascent = 0, lineH = 0;
+};
+
+// Flatten inline-level content into a stream of items.
+static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& items) {
+    DepthScope _d; if (g_depth > kMaxDepth) return;
+    if (box->kind == BoxKind::Text) {
+        FontKey f = E.fontFor(box->style);
+        float lh = E.lineHeightFor(box->style);
+        float asc = Ascent(lh, f.size);
+        const std::wstring& t = box->text;
+        size_t i = 0;
+        while (i < t.size()) {
+            if (IsSpace(t[i])) {
+                InlineItem it; it.type = InlineItem::Space; it.box = box; it.font = f;
+                it.width = E.in.measure ? E.in.measure->SpaceWidth(f) : f.size * 0.3f;
+                it.ascent = asc; it.lineH = lh;
+                items.push_back(it);
+                i++;
+                continue;
+            }
+            size_t j = i;
+            while (j < t.size() && !IsSpace(t[j])) j++;
+            std::wstring word = t.substr(i, j - i);
+            InlineItem it; it.type = InlineItem::Word; it.text = word; it.box = box; it.font = f;
+            it.width = E.in.measure ? E.in.measure->MeasureText(word, f) : (float)word.size() * f.size * 0.5f;
+            it.ascent = asc; it.lineH = lh;
+            items.push_back(it);
+            i = j;
+        }
+        return;
+    }
+    if (box->kind == BoxKind::Break) {
+        InlineItem it; it.type = InlineItem::Break; it.box = box;
+        items.push_back(it);
+        return;
+    }
+    if (box->kind == BoxKind::InlineBlock || box->kind == BoxKind::Replaced) {
+        // Atomic: lay it out now to learn its size (shrink-to-fit to content).
+        std::vector<LayoutBox*> pos;
+        E.layoutBox(*box, 0, 1e6f, -1, pos, nullptr);
+        InlineItem it; it.type = InlineItem::Atomic; it.box = box;
+        it.width = box->marginBoxW();
+        FontKey f = E.fontFor(box->style);
+        it.font = f; it.lineH = box->marginBoxH();
+        it.ascent = box->marginBoxH();  // baseline at bottom for replaced
+        items.push_back(it);
+        return;
+    }
+    // Inline box (span/a/em…): recurse into children, carrying its style.
+    for (auto& k : box->kids) CollectInline(E, k.get(), items);
+}
+
+float Engine::layoutInline(LayoutBox& box, FloatCtx* fctx) {
+    DepthScope _d; if (g_depth > kMaxDepth) return 0;
+    std::vector<InlineItem> items;
+    for (auto& k : box.kids) CollectInline(*this, k.get(), items);
+
+    float cLeft  = box.contentX();
+    float cRight = box.contentX() + box.contentW;
+    float top    = box.contentY();
+    bool nowrap  = box.style.whiteSpaceNowrap;
+    int  align   = box.style.textAlignSet ? box.style.textAlign : 0;
+
+    float y = top;
+    size_t i = 0;
+    box.lines.clear();
+
+    while (i < items.size()) {
+        // Determine usable horizontal band at this y (consult floats).
+        float probeH = 0;
+        for (size_t k = i; k < items.size() && k < i + 1; ++k) probeH = std::max(probeH, items[k].lineH);
+        if (probeH <= 0) probeH = lineHeightFor(box.style);
+        float lineLeft  = fctx ? fctx->leftEdge(y, probeH) : cLeft;
+        float lineRight = fctx ? fctx->rightEdge(y, probeH) : cRight;
+        if (lineRight <= lineLeft && fctx) {
+            float nb = fctx->nextBreakBelow(y);
+            if (nb > y) { y = nb; continue; }
+            lineLeft = cLeft; lineRight = cRight;
+        }
+        float avail = lineRight - lineLeft;
+
+        // Greedily pack a line.
+        LineBox line;
+        line.x = lineLeft; line.y = y; line.w = 0;
+        float lineWidth = 0, lineH = 0, lineAsc = 0;
+        bool any = false, brk = false;
+
+        // Skip leading spaces.
+        while (i < items.size() && items[i].type == InlineItem::Space) i++;
+
+        size_t lineStart = i;
+        std::vector<size_t> chosen;
+        while (i < items.size()) {
+            InlineItem& it = items[i];
+            if (it.type == InlineItem::Break) { brk = true; i++; break; }
+            float adv = it.width;
+            if (it.type == InlineItem::Space) {
+                // pending space: only counts if a word follows on this line
+                if (!any) { i++; continue; }
+                // look ahead
+                adv = it.width;
+            }
+            if (any && !nowrap && (lineWidth + adv) > avail && it.type != InlineItem::Space) {
+                break;  // wrap before this item
+            }
+            chosen.push_back(i);
+            lineWidth += adv;
+            lineH = std::max(lineH, it.lineH);
+            lineAsc = std::max(lineAsc, it.ascent);
+            any = true;
+            i++;
+        }
+        // Trim a trailing space from the line width.
+        while (!chosen.empty() && items[chosen.back()].type == InlineItem::Space) {
+            lineWidth -= items[chosen.back()].width;
+            chosen.pop_back();
+        }
+        if (lineH <= 0) lineH = lineHeightFor(box.style);
+        if (lineAsc <= 0) lineAsc = Ascent(lineH, fontFor(box.style).size);
+
+        // Horizontal alignment offset.
+        float offset = 0;
+        if (align == 2) offset = avail - lineWidth;         // right
+        else if (align == 1) offset = (avail - lineWidth) / 2; // center
+        if (offset < 0) offset = 0;
+
+        // Place fragments.
+        float fx = lineLeft + offset;
+        for (size_t idx : chosen) {
+            InlineItem& it = items[idx];
+            if (it.type == InlineItem::Space) { fx += it.width; continue; }
+            InlineFrag frag;
+            frag.src = it.box;
+            frag.x = fx;
+            frag.w = it.width;
+            if (it.type == InlineItem::Atomic) {
+                // bottom-align to baseline: top so that bottom sits on baseline.
+                frag.h = it.box->marginBoxH();
+                frag.baseline = frag.h;
+                frag.y = y + lineAsc - frag.baseline;
+                // place the atomic box at the fragment position.
+                it.box->x = fx + it.box->marginLeft;
+                it.box->y = frag.y + it.box->marginTop;
+            } else {
+                frag.text = it.text;
+                frag.h = it.lineH;
+                frag.baseline = it.ascent;
+                frag.y = y + (lineAsc - it.ascent);
+            }
+            line.frags.push_back(frag);
+            fx += it.width;
+        }
+        line.w = lineWidth; line.h = lineH; line.baseline = lineAsc;
+        if (!line.frags.empty() || brk) box.lines.push_back(line);
+
+        y += lineH;
+        if (lineStart == i && !brk) { i++; }  // safety: avoid infinite loop
+    }
+    return y - top;
+}
+
+// ─── positioned layout ───────────────────────────────────────────────────────
+
+// Walk the tree collecting out-of-flow boxes paired with their nearest
+// positioned ancestor (the containing block), so we can lay them out after
+// normal flow has fixed everyone's geometry.
+void Engine::collectPositioned(LayoutBox& box, LayoutBox* nearestPositioned,
+                               std::vector<std::pair<LayoutBox*, LayoutBox*>>& out) {
+    DepthScope _d; if (g_depth > kMaxDepth) return;
+    LayoutBox* nextNearest = box.isPositioned() ? &box : nearestPositioned;
+    for (auto& k : box.kids) {
+        if (k->isOutOfFlow())
+            out.push_back({ k.get(), k->style.positionMode == 3 ? nullptr : nextNearest });
+        collectPositioned(*k, nextNearest, out);
+    }
+    // Atomic inline-blocks may also contain positioned descendants laid out via
+    // their own subtree; collectPositioned already recurses into kids above.
+}
+
+void Engine::layoutPositioned(LayoutBox& root, std::vector<LayoutBox*>& /*unused*/) {
+    std::vector<std::pair<LayoutBox*, LayoutBox*>> items;
+    collectPositioned(root, &root, items);
+
+    for (auto& [b, cb] : items) {
+        const ComputedStyle& s = b->style;
+        // Containing block rect (padding box for positioned ancestor, else viewport/root).
+        float cbX, cbY, cbW, cbH;
+        if (s.positionMode == 3 || !cb) {
+            cbX = 0; cbY = 0; cbW = in.viewportW; cbH = in.viewportH;
+        } else {
+            cbX = cb->contentX(); cbY = cb->contentY();
+            cbW = cb->contentW;   cbH = cb->contentH;
+        }
+
+        resolveEdges(*b);
+        b->marginTop    = s.marginTopSet()    && !s.isMarginAuto(s.marginTop)    ? px(s.marginTop)    : 0;
+        b->marginBottom = s.marginBottomSet() && !s.isMarginAuto(s.marginBottom) ? px(s.marginBottom) : 0;
+        b->marginLeft   = s.marginLeftSet()   && !s.isMarginAuto(s.marginLeft)   ? px(s.marginLeft)   : 0;
+        b->marginRight  = s.marginRightSet()  && !s.isMarginAuto(s.marginRight)  ? px(s.marginRight)  : 0;
+
+        float bpX = b->borderLeft + b->padLeft + b->borderRight + b->padRight;
+
+        // Resolve width.
+        float w = usedWidth(s, cbW);
+        if (w < 0) {
+            if (s.leftSet && s.rightSet)
+                w = std::max(0.f, cbW - px(s.left) - px(s.right) - b->marginLeft - b->marginRight - bpX);
+            else
+                w = std::min(maxContent(*b), std::max(0.f, cbW - bpX));  // shrink-to-fit
+        }
+        if (s.maxWidth >= 0) w = std::min(w, px(s.maxWidth));
+        if (s.minWidth >= 0) w = std::max(w, px(s.minWidth));
+        b->contentW = w;
+
+        // Lay out the subtree (block or inline) to learn height.
+        std::vector<LayoutBox*> dummy;
+        {
+            // temporarily compute children with x/y unset; we'll translate after.
+            b->x = 0; b->y = 0;
+            if (b->establishesInline) {
+                FloatCtx local; local.cbLeft = b->contentX(); local.cbRight = b->contentX() + b->contentW;
+                float h = layoutInline(*b, &local);
+                float eh = usedHeight(s, cbH);
+                b->contentH = eh >= 0 ? eh : h;
+            } else {
+                layoutBlockChildren(*b, dummy);
+                float eh = usedHeight(s, cbH);
+                if (eh >= 0) b->contentH = eh;
+            }
+            if (s.maxHeight >= 0) b->contentH = std::min(b->contentH, px(s.maxHeight));
+            if (s.minHeight >= 0) b->contentH = std::max(b->contentH, px(s.minHeight));
+        }
+
+        // Final border-box position.
+        float bx, by;
+        if (s.leftSet)       bx = cbX + px(s.left) + b->marginLeft;
+        else if (s.rightSet) bx = cbX + cbW - px(s.right) - b->borderBoxW() - b->marginRight;
+        else                 bx = cbX;  // static-ish fallback
+        if (s.topSet)        by = cbY + px(s.top) + b->marginTop;
+        else if (s.bottomSet)by = cbY + cbH - px(s.bottom) - b->borderBoxH() - b->marginBottom;
+        else                 by = cbY;
+
+        float dx = bx - b->x, dy = by - b->y;
+        // Translate the whole subtree (children were laid out relative to b->x/y=0).
+        std::function<void(LayoutBox&, float, float)> shift = [&](LayoutBox& n, float ddx, float ddy) {
+            n.x += ddx; n.y += ddy;
+            for (auto& ln : n.lines) {
+                ln.x += ddx; ln.y += ddy;
+                for (auto& fr : ln.frags) { fr.x += ddx; fr.y += ddy; }
+            }
+            for (auto& c : n.kids) shift(*c, ddx, ddy);
+        };
+        shift(*b, dx, dy);
+
+        // Recurse: positioned descendants of this box relative to it.
+        std::vector<LayoutBox*> nested;
+        layoutPositioned(*b, nested);
+    }
+}
+
+// ─── relative offset pass ────────────────────────────────────────────────────
+void ApplyRelativeOffsets(Engine& E, LayoutBox& box) {
+    for (auto& k : box.kids) ApplyRelativeOffsets(E, *k);
+    if (box.style.positionMode == 1) {
+        float dx = 0, dy = 0;
+        if (box.style.leftSet)       dx = E.px(box.style.left);
+        else if (box.style.rightSet) dx = -E.px(box.style.right);
+        if (box.style.topSet)        dy = E.px(box.style.top);
+        else if (box.style.bottomSet)dy = -E.px(box.style.bottom);
+        std::function<void(LayoutBox&)> shift = [&](LayoutBox& n) {
+            n.x += dx; n.y += dy;
+            for (auto& ln : n.lines) { ln.x += dx; ln.y += dy; for (auto& fr : ln.frags) { fr.x += dx; fr.y += dy; } }
+            for (auto& c : n.kids) shift(*c);
+        };
+        shift(box);
+    }
+}
+
+} // namespace
+
+// ─── public entry point ──────────────────────────────────────────────────────
+
+std::unique_ptr<LayoutBox> LayoutDocument(const LayoutInput& in) {
+    if (!in.document) return nullptr;
+
+    BuildCtx bc{ in.sheet, in.measure, in.zoom, in.baseUrl };
+
+    // Root style: defaults (16px black, sans-serif).
+    ComputedStyle rootStyle;
+    rootStyle.fontSize = 16;
+    rootStyle.color = { true, 0, 0, 0, 1 };
+
+    // Find <html> (or use the document node).
+    const Node* htmlNode = nullptr;
+    std::function<const Node*(const Node*)> findHtml = [&](const Node* n) -> const Node* {
+        if (!n) return nullptr;
+        if (n->type == NodeType::Element && n->tagName == "html") return n;
+        for (auto& c : n->children) if (auto* r = findHtml(c.get())) return r;
+        return nullptr;
+    };
+    htmlNode = findHtml(in.document);
+
+    auto root = std::make_unique<LayoutBox>();
+    root->kind = BoxKind::Block;
+    root->anonymous = true;
+    root->style = rootStyle;
+    root->contentW = in.viewportW;
+
+    if (htmlNode) {
+        if (auto hb = BuildBox(htmlNode, rootStyle, bc, "")) root->kids.push_back(std::move(hb));
+    } else {
+        // No <html>: build from body or document children directly.
+        for (auto& c : in.document->children)
+            if (auto cb = BuildBox(c.get(), rootStyle, bc, "")) root->kids.push_back(std::move(cb));
+    }
+    AnonymousFixup(root.get());
+
+    Engine E(in);
+    root->x = 0; root->y = 0;
+    // The initial containing block: content origin at (0,0), width = viewport.
+    root->contentW = in.viewportW;
+    std::vector<LayoutBox*> positioned;
+    if (root->establishesInline) {
+        FloatCtx local; local.cbLeft = 0; local.cbRight = in.viewportW;
+        float h = E.layoutInline(*root, &local);
+        root->contentH = h;
+    } else {
+        E.layoutBlockChildren(*root, positioned);
+    }
+
+    // Relative offsets, then absolutely/fixed positioned boxes.
+    ApplyRelativeOffsets(E, *root);
+    std::vector<LayoutBox*> dummy;
+    E.layoutPositioned(*root, dummy);
+
+    return root;
+}
+
