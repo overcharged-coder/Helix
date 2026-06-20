@@ -1,0 +1,59 @@
+#include "html/resources.h"
+
+#include "network/fetcher.h"
+#include "network/url.h"
+
+#include <algorithm>
+#include <cctype>
+#include <vector>
+
+namespace {
+constexpr size_t kMaxScripts = 24;
+constexpr size_t kMaxTotalBytes = 512 * 1024;
+constexpr size_t kMaxScriptBytes = 32 * 1024; // matches JsEngine's safe parser limit
+
+std::string LowerTrim(std::string value) {
+    const auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
+    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
+    for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+bool IsClassicJavaScript(const Node& script) {
+    const std::string type = LowerTrim(script.attr("type"));
+    return type.empty() || type == "text/javascript" || type == "application/javascript"
+        || type == "application/ecmascript" || type == "text/ecmascript";
+}
+} // namespace
+
+void LoadExternalScriptSources(const std::shared_ptr<Node>& document,
+                               const std::string& pageUrl) {
+    if (!document) return;
+
+    std::vector<Node*> stack{ document.get() };
+    size_t loaded = 0;
+    size_t loadedBytes = 0;
+    while (!stack.empty() && loaded < kMaxScripts && loadedBytes < kMaxTotalBytes) {
+        Node* node = stack.back();
+        stack.pop_back();
+
+        if (node->type == NodeType::Element && node->tagName == "script"
+            && IsClassicJavaScript(*node) && !node->attr("src").empty()) {
+            const std::string url = ResolveUrlAgainstBase(node->attr("src"), pageUrl);
+            const FetchResult response = FetchUrl(url);
+            if (response.success && !response.body.empty()
+                && response.body.size() <= kMaxScriptBytes
+                && loadedBytes + response.body.size() <= kMaxTotalBytes) {
+                node->children.clear();
+                node->appendChild(Node::makeText(response.body));
+                node->attrs["__helix_script_filename"] = url;
+                loadedBytes += response.body.size();
+                ++loaded;
+            }
+        }
+
+        for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
+            stack.push_back(it->get());
+    }
+}
