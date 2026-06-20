@@ -95,6 +95,13 @@ private:
     std::vector<Microtask> m_microtasks;
     std::vector<Macrotask> m_macrotasks;
 
+    // Runaway-script guard: a top-level execution is aborted once it exceeds a
+    // wall-clock deadline, so an infinite loop / pathological script can't hang
+    // the browser. m_deadlineMs is a steady_clock millisecond timestamp.
+    long long m_deadlineMs = 0;
+    uint64_t  m_instrCount = 0;
+    int       m_executeDepth = 0;
+
     // Per-function constant string cache (const idx → JsString*).
     std::unordered_map<std::string, JsString*> m_stringCache;
 

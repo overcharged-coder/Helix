@@ -4,6 +4,14 @@
 #include <cassert>
 #include <sstream>
 #include <stdexcept>
+#include <chrono>
+
+static long long NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+// Maximum wall-clock time a single top-level script run may take.
+static constexpr long long kScriptBudgetMs = 4000;
 
 VM::VM(GC& gc) : m_gc(gc) {
     m_globals = m_gc.newObject(ObjKind::Plain);
@@ -362,6 +370,10 @@ JsValue VM::runFrame(CallFrame& frame) {
     JsValue caughtException;
 
     while (frame.pc < (int)code.size()) {
+        // Runaway-script guard: check the wall-clock deadline periodically
+        // (cheap: only every 65536 instructions).
+        if ((++m_instrCount & 0xFFFF) == 0 && m_deadlineMs && NowMs() > m_deadlineMs)
+            throw std::runtime_error("Script execution exceeded time limit");
         const Instruction& ins = code[frame.pc++];
         int ln = fn->lines.empty() ? 0 : fn->lines[frame.pc-1];
 
@@ -760,7 +772,14 @@ JsValue VM::runFrame(CallFrame& frame) {
 }
 
 JsValue VM::execute(BytecodeFunction* fn, JsValue thisVal) {
+    // Start the runaway-script deadline at the outermost execution only.
+    if (m_executeDepth == 0) m_deadlineMs = NowMs() + kScriptBudgetMs;
+    ++m_executeDepth;
     std::vector<JsValue> noArgs;
     std::vector<Upvalue*> noUpvals;
-    return callBytecode(fn, thisVal, noArgs, false, noUpvals);
+    JsValue r;
+    try { r = callBytecode(fn, thisVal, noArgs, false, noUpvals); }
+    catch (...) { --m_executeDepth; throw; }
+    --m_executeDepth;
+    return r;
 }

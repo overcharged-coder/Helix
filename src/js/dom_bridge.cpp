@@ -21,6 +21,10 @@ static void addNative(VM& vm, JsObject* obj, const std::string& name, NativeFn f
 
 static std::unordered_map<Node*, std::shared_ptr<Node>> g_nodeStore;
 static std::unordered_map<Node*, JsObject*> g_wrapperStore;
+// Persistent GC roots for cached DOM wrappers. These live at STABLE heap
+// addresses so the GC can mark them safely (rooting a stack local was a
+// use-after-return bug). Cleared per document in registerDom().
+static std::vector<std::unique_ptr<JsValue>> g_wrapperRoots;
 
 static std::shared_ptr<Node> getShared(Node* raw) {
     auto it = g_nodeStore.find(raw);
@@ -102,8 +106,12 @@ static std::string innerHTML(VM& vm, Node* n) {
 // Forward declared free function for querySelector
 static std::vector<std::shared_ptr<Node>> domQueryAll(Node* root, const std::string& sel) {
     std::vector<std::shared_ptr<Node>> result;
+    size_t visited = 0;
+    int depth = 0;
     std::function<void(Node*)> walk = [&](Node* n) {
+        if (++depth > 1000) { --depth; return; }   // guard against deep/cyclic trees
         for (auto& c : n->children) {
+            if (++visited > 200000) break;          // guard against runaway traversal
             bool match = false;
             if (!sel.empty() && sel[0]=='#') match = (c->attr("id") == sel.substr(1));
             else if (!sel.empty() && sel[0]=='.') match = (c->attr("class").find(sel.substr(1)) != std::string::npos);
@@ -111,6 +119,7 @@ static std::vector<std::shared_ptr<Node>> domQueryAll(Node* root, const std::str
             if (match) result.push_back(c);
             walk(c.get());
         }
+        --depth;
     };
     walk(root);
     return result;
@@ -132,8 +141,14 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
     obj->domNode = raw;
     g_wrapperStore[raw] = obj;
 
-    JsValue objValue = JsValue::object(obj);
-    vm.gc().addRoot(&objValue);
+    // Keep the wrapper alive while it stays cached in g_wrapperStore by rooting
+    // it at a stable heap address. Previously this rooted the address of a local
+    // (&objValue); after the function returned, the GC dereferenced that
+    // dangling stack pointer during marking — a non-deterministic crash/hang
+    // that worsened as more nodes were wrapped (large DOMs).
+    g_wrapperRoots.push_back(std::make_unique<JsValue>(JsValue::object(obj)));
+    vm.gc().addRoot(g_wrapperRoots.back().get());
+    JsValue objValue = *g_wrapperRoots.back();
 
     // ── Core properties ──
 
@@ -159,16 +174,18 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
     addPropAccessor("class");
     obj->setProp("className", vm.str(node->attr("class")));
 
-    // ── textContent ──
-    obj->setProp("textContent", vm.str(textContent(raw)));
-
-    // ── innerHTML / outerHTML ──
+    // ── textContent / innerHTML / outerHTML ──
+    // Only serialize small subtrees eagerly. For large nodes (document, html,
+    // body…) this is skipped: serializing every wrapped node's whole subtree is
+    // O(n^2) over a page and makes DOM-heavy scripts crawl to a halt.
     if (CanEagerSerialize(raw)) {
-        obj->setProp("innerHTML", vm.str(innerHTML(vm, raw)));
-        obj->setProp("outerHTML", vm.str(outerHTML(vm, raw)));
+        obj->setProp("textContent", vm.str(textContent(raw)));
+        obj->setProp("innerHTML",   vm.str(innerHTML(vm, raw)));
+        obj->setProp("outerHTML",   vm.str(outerHTML(vm, raw)));
     } else {
-        obj->setProp("innerHTML", vm.str(""));
-        obj->setProp("outerHTML", vm.str(""));
+        obj->setProp("textContent", vm.str(""));
+        obj->setProp("innerHTML",   vm.str(""));
+        obj->setProp("outerHTML",   vm.str(""));
     }
 
     // ── attributes map ──
@@ -502,6 +519,9 @@ JsValue wrapNode(VM& vm, std::shared_ptr<Node> node) {
 void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                  std::function<void()> onRepaint) {
     vm.onDomDirty = onRepaint;
+    // Release the previous document's wrapper roots before rewrapping.
+    for (auto& r : g_wrapperRoots) vm.gc().removeRoot(r.get());
+    g_wrapperRoots.clear();
     g_wrapperStore.clear();
 
     JsValue docVal = wrapNode(vm, docNode);

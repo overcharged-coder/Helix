@@ -82,6 +82,13 @@ add_executable(dump_layout tools/dump_layout.cpp)
 target_include_directories(dump_layout PRIVATE src)
 target_link_libraries(dump_layout PRIVATE helix_engine wininet)
 
-set_target_properties(Helix helix-tests dump_layout PROPERTIES
+add_executable(dump_js tools/dump_js.cpp)
+target_include_directories(dump_js PRIVATE src)
+target_link_libraries(dump_js PRIVATE helix_engine wininet)
+if (MSVC)
+    target_link_options(dump_js PRIVATE /DYNAMICBASE:NO /MAP)
+endif()
+
+set_target_properties(Helix helix-tests dump_layout dump_js PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
 )

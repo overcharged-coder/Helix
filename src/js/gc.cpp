@@ -23,7 +23,14 @@ std::string JsValue::toString() const {
     case JsTag::Object: {
         if (!u.obj) return "null";
         if (u.obj->kind == ObjKind::Array) {
-            // [a,b,c]
+            // [a,b,c] — guard against self-referential arrays. Without this an
+            // array that (transitively) contains itself recurses forever
+            // (stack overflow), and a mere depth cap turns it into an n^depth
+            // blow-up. Track arrays currently being stringified and bail on
+            // re-entry, matching JS behaviour (Array.toString of a cycle).
+            static thread_local std::vector<const JsObject*> inProgress;
+            for (const JsObject* o : inProgress) if (o == u.obj) return "";
+            inProgress.push_back(u.obj);
             std::string out;
             uint32_t len = u.obj->arrayLength();
             for (uint32_t i = 0; i < len; i++) {
@@ -31,6 +38,7 @@ std::string JsValue::toString() const {
                 JsValue el = u.obj->arrayGet(i);
                 if (!el.isNullOrUndefined()) out += el.toString();
             }
+            inProgress.pop_back();
             return out;
         }
         // Try toString property (basic)
