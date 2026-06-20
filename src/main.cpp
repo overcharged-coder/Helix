@@ -714,7 +714,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         for (auto& c : n->children)
                             if (c->type == NodeType::Text) src += c->text;
                         totalScriptBytes += src.size();
-                        if (!src.empty() && scriptCount < 128 && totalScriptBytes <= 256 * 1024) {
+                        // Page scripts are opt-in: heavy real-world JS (e.g. Bing's
+                        // search page) running in our incomplete environment tends to
+                        // rewrite/blank the DOM. Rendering the static HTML is far more
+                        // useful. Set HELIX_JS=1 to re-enable script execution.
+                        static bool jsEnabled = (getenv("HELIX_JS") != nullptr);
+                        if (jsEnabled && !src.empty() && scriptCount < 128 && totalScriptBytes <= 256 * 1024) {
                             g_js.runScript(src, "inline");
                         }
                         ++scriptCount;

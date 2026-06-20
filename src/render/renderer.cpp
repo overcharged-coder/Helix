@@ -1,5 +1,6 @@
 #include "render/renderer.h"
 #include "layout/layout_engine.h"
+#include "network/url.h"
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -1729,8 +1730,12 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
                 PaintBox(*m_layoutRoot, scrollY, topInset, false);
                 docH = m_layoutRoot->contentH + 32.f;
             }
+        } catch (const std::exception& ex) {
+            FILE* f = fopen("C:/tmp/helix_crash.txt", "a");
+            if (f) { fprintf(f, "LAYOUT/PAINT exception: %s\n", ex.what()); fclose(f); }
         } catch (...) {
-            // swallow — render what we have, keep the browser alive
+            FILE* f = fopen("C:/tmp/helix_crash.txt", "a");
+            if (f) { fprintf(f, "LAYOUT/PAINT unknown exception\n"); fclose(f); }
         }
 
         HRESULT hr = m_rt->EndDraw();
@@ -1746,7 +1751,7 @@ std::string Renderer::HitTest(float x, float y) const {
     for (auto it = m_hits.rbegin(); it != m_hits.rend(); ++it)
         if (x >= it->x && x <= it->x + it->w
          && y >= it->y && y <= it->y + it->h)
-            return it->href;
+            return UnwrapBingRedirect(it->href);
     return {};
 }
 

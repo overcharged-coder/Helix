@@ -57,6 +57,27 @@ TestResult RunLayoutEngineTests() {
         "found rowDelta=105 rowWidth=95 columnDelta=30\n",
         result);
 
+    {
+        std::string giantText(256 * 1024, 'x');
+        auto giantDom = ParseHtml("<html><body><p id=\"giant\">" + giantText + "</p></body></html>");
+        auto giantSheet = ParseStylesheet("");
+        FixedMeasure giantMeasure;
+        LayoutInput giantInput;
+        giantInput.document = giantDom.get();
+        giantInput.sheet = &giantSheet;
+        giantInput.measure = &giantMeasure;
+        giantInput.viewportW = 640.f;
+        giantInput.viewportH = 480.f;
+        auto giantLayout = LayoutDocument(giantInput);
+        auto* giant = FindEngineBoxById(giantLayout.get(), "giant");
+        const bool bounded = giant && !giant->kids.empty()
+            && giant->kids.front()->text.size() <= 16 * 1024;
+        ExpectEqual("layout-engine/giant-text-is-bounded-before-measurement",
+            bounded ? "bounded\n" : "unbounded\n",
+            "bounded\n",
+            result);
+    }
+
     // Float text-wrap: paragraphs (even nested in a wrapper) must wrap their
     // line boxes to the left of a float:right sidebar, and the wrapper must not
     // stretch to the float's bottom.

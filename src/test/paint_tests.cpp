@@ -16,5 +16,15 @@ TestResult RunPaintTests() {
     auto actual = SerializeDisplayList(items);
     ExpectEqual("paint/basic", actual, expected, result);
 
+    {
+        auto root = FindRepoRoot();
+        std::string painter = ReadTextFile(root / "src/render/box_paint.cpp");
+        const bool usesStableFontKey = painter.find("const std::string fontKey = FontCacheKey(f);") != std::string::npos;
+        ExpectEqual("paint/text-measurement-cache-key-uses-stable-storage",
+            usesStableFontKey ? "stable\n" : "temporary\n",
+            "stable\n",
+            result);
+    }
+
     return result;
 }

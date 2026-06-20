@@ -112,6 +112,12 @@ struct ComputedStyle {
     bool     listStyleSet     = false;
     // Border-spacing
     float    borderSpacing    = -1;
+    // Baseline flex formatting values.
+    int      flexDirection   = 0; // 0=row, 1=column
+    bool     flexDirectionSet = false;
+    float    flexGrow        = 0;
+    bool     flexGrowSet     = false;
+    float    flexGap         = -1;
 
     bool isDisplayNone()        const { return display == 3; }
     bool isDisplayBlock()       const { return display == 1; }
@@ -209,6 +215,15 @@ struct ComputedStyle {
         if (child.visibilitySet) { out.visibilityHidden = child.visibilityHidden; out.visibilitySet = true; }
         if (child.listStyleSet) { out.listStyleNone = child.listStyleNone; out.listStyleSet = true; }
         if (child.borderSpacing >= 0) out.borderSpacing = child.borderSpacing;
+        if (child.flexDirectionSet) {
+            out.flexDirection = child.flexDirection;
+            out.flexDirectionSet = true;
+        }
+        if (child.flexGrowSet) {
+            out.flexGrow = child.flexGrow;
+            out.flexGrowSet = true;
+        }
+        if (child.flexGap >= 0) out.flexGap = child.flexGap;
         return out;
     }
 };

@@ -564,6 +564,28 @@ static void ApplyDeclaration(const std::string& prop,
         else if (v == "table-row")                                     out.display = 9;
         else if (v == "table-row-group" || v == "table-header-group"
               || v == "table-footer-group")                            out.display = 10;
+    } else if (prop == "flex-direction") {
+        out.flexDirectionSet = true;
+        out.flexDirection = sLower(sTrim(val)) == "column" ? 1 : 0;
+    } else if (prop == "flex-grow") {
+        try {
+            out.flexGrow = std::max(0.f, std::stof(sTrim(val)));
+            out.flexGrowSet = true;
+        } catch (...) {}
+    } else if (prop == "flex") {
+        std::istringstream values(val);
+        std::string grow;
+        values >> grow;
+        try {
+            out.flexGrow = std::max(0.f, std::stof(grow));
+            out.flexGrowSet = true;
+        } catch (...) {}
+    } else if (prop == "gap") {
+        std::istringstream values(val);
+        std::string gap;
+        values >> gap;
+        float parsed = ParseLength(gap);
+        if (parsed >= 0) out.flexGap = parsed;
     } else if (prop == "margin") {
         std::istringstream vs(val); std::vector<float> v;
         std::string tok;

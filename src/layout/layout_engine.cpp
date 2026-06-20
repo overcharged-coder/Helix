@@ -29,6 +29,10 @@ constexpr int kMaxDepth = 400;
 struct DepthScope { DepthScope() { ++g_depth; } ~DepthScope() { --g_depth; } };
 
 constexpr float kNormalLH = 1.2f;   // line-height: normal factor
+// A single text node should never be able to allocate unbounded layout,
+// measurement, and paint buffers. This also contains malformed data URIs that
+// accidentally reach text flow instead of a skipped raw-text element.
+constexpr size_t kMaxTextNodeBytes = 16 * 1024;
 
 float Ascent(float lineH, float fontSize) {
     // Distribute the leading half above / half below the em box; place the
@@ -41,16 +45,17 @@ bool IsSpace(wchar_t c) { return c == L' ' || c == L'\t' || c == L'\n' || c == L
 
 std::wstring ToWide(const std::string& s) {
     std::wstring w;
-    w.reserve(s.size());
+    const size_t limit = std::min(s.size(), kMaxTextNodeBytes);
+    w.reserve(limit);
     size_t i = 0;
-    while (i < s.size()) {
+    while (i < limit) {
         unsigned char c = (unsigned char)s[i];
         if (c < 0x80) { w += (wchar_t)c; i += 1; }
-        else if ((c >> 5) == 0x6 && i + 1 < s.size()) {
+        else if ((c >> 5) == 0x6 && i + 1 < limit) {
             w += (wchar_t)(((c & 0x1F) << 6) | (s[i+1] & 0x3F)); i += 2;
-        } else if ((c >> 4) == 0xE && i + 2 < s.size()) {
+        } else if ((c >> 4) == 0xE && i + 2 < limit) {
             w += (wchar_t)(((c & 0x0F) << 12) | ((s[i+1] & 0x3F) << 6) | (s[i+2] & 0x3F)); i += 3;
-        } else if ((c >> 3) == 0x1E && i + 3 < s.size()) {
+        } else if ((c >> 3) == 0x1E && i + 3 < limit) {
             // surrogate pair
             unsigned int cp = ((c & 0x07) << 18) | ((s[i+1] & 0x3F) << 12)
                             | ((s[i+2] & 0x3F) << 6) | (s[i+3] & 0x3F);
@@ -543,6 +548,7 @@ struct Engine {
     // ── forward decls ────────────────────────────────────────────────────────
     void layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positionedOut,
                              struct FloatCtx* inherited = nullptr);
+    void layoutFlex(LayoutBox& box, std::vector<LayoutBox*>& positionedOut);
     void layoutTable(LayoutBox& box);
     float layoutInline(LayoutBox& box, struct FloatCtx* fctx);
     void layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
@@ -691,7 +697,12 @@ void Engine::layoutBox(LayoutBox& box, float cbX, float cbW, float cbH,
     // Establish inline formatting context or block formatting.
     float explicitH = usedHeight(s, cbH);
 
-    if (box.establishesInline) {
+    if (s.isDisplayFlex()) {
+        std::vector<LayoutBox*> positioned;
+        layoutFlex(box, positioned);
+        for (auto* p : positioned) positionedOut.push_back(p);
+        if (explicitH >= 0) box.contentH = explicitH;
+    } else if (box.establishesInline) {
         FloatCtx local;
         local.cbLeft = box.contentX();
         local.cbRight = box.contentX() + box.contentW;
@@ -825,6 +836,66 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
     for (size_t fi = inheritedFloatCount; fi < fctx.floats.size(); ++fi)
         contentBottom = std::max(contentBottom, fctx.floats[fi].bottom);
     box.contentH = std::max(0.f, contentBottom - box.contentY());
+}
+
+void Engine::layoutFlex(LayoutBox& box, std::vector<LayoutBox*>& positionedOut) {
+    std::vector<LayoutBox*> items;
+    for (auto& child : box.kids) {
+        if (child->isOutOfFlow()) positionedOut.push_back(child.get());
+        else if (!child->isFloat()) items.push_back(child.get());
+    }
+    if (items.empty()) { box.contentH = 0; return; }
+
+    const float gap = px(std::max(0.f, box.style.flexGap));
+    if (box.style.flexDirection == 1) {
+        float cursorY = box.contentY();
+        for (LayoutBox* item : items) {
+            item->y = cursorY;
+            std::vector<LayoutBox*> positioned;
+            layoutBox(*item, box.contentX(), box.contentW, -1.f, positioned, nullptr);
+            for (auto* p : positioned) positionedOut.push_back(p);
+            cursorY += item->marginBoxH() + gap;
+        }
+        box.contentH = std::max(0.f, cursorY - box.contentY() - gap);
+        return;
+    }
+
+    struct ItemSize { LayoutBox* box; float basis; float grow; };
+    std::vector<ItemSize> sized;
+    float used = gap * std::max(0, (int)items.size() - 1);
+    float growTotal = 0;
+    for (LayoutBox* item : items) {
+        float basis = usedWidth(item->style, box.contentW);
+        if (basis < 0) basis = maxContent(*item);
+        basis = std::max(0.f, basis);
+        const float grow = item->style.flexGrowSet ? item->style.flexGrow : 0.f;
+        sized.push_back({ item, basis, grow });
+        used += basis + hExtra(item->style);
+        growTotal += grow;
+    }
+
+    const float free = std::max(0.f, box.contentW - used);
+    float cursorX = box.contentX();
+    float maxH = 0;
+    for (const auto& item : sized) {
+        LayoutBox& child = *item.box;
+        const float width = item.basis + (growTotal > 0 ? free * item.grow / growTotal : 0.f);
+        const float marginLeft = child.style.marginLeftSet() && !child.style.isMarginAuto(child.style.marginLeft)
+            ? px(child.style.marginLeft) : 0.f;
+        const float oldWidth = child.style.width;
+        const float oldPercent = child.style.widthPercent;
+        child.style.width = width / std::max(0.01f, Z);
+        child.style.widthPercent = -1;
+        child.y = box.contentY();
+        std::vector<LayoutBox*> positioned;
+        layoutBox(child, cursorX - marginLeft, box.contentW, -1.f, positioned, nullptr);
+        for (auto* p : positioned) positionedOut.push_back(p);
+        child.style.width = oldWidth;
+        child.style.widthPercent = oldPercent;
+        cursorX += child.marginBoxW() + gap;
+        maxH = std::max(maxH, child.marginBoxH());
+    }
+    box.contentH = maxH;
 }
 
 // ─── table layout (auto algorithm) ───────────────────────────────────────────
@@ -1298,4 +1369,3 @@ std::unique_ptr<LayoutBox> LayoutDocument(const LayoutInput& in) {
 
     return root;
 }
-

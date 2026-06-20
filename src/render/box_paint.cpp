@@ -11,6 +11,7 @@
 #include <cctype>
 
 static D2D1_COLOR_F ToD2Dc(const CssColor& c) { return { c.r, c.g, c.b, c.a }; }
+static constexpr size_t kMaxMeasuredTextChars = 16 * 1024;
 
 static std::string FontCacheKey(const FontKey& f) {
     std::string k = std::to_string((int)(f.size * 4));
@@ -49,7 +50,13 @@ IDWriteTextFormat* Renderer::FormatForKey(const FontKey& f) {
 
 float Renderer::MeasureText(const std::wstring& s, const FontKey& f) {
     if (s.empty() || !m_dwrite) return 0.f;
-    std::wstring ck = std::wstring(FontCacheKey(f).begin(), FontCacheKey(f).end()) + L"\x1" + s;
+    if (s.size() > kMaxMeasuredTextChars)
+        return MeasureText(s.substr(0, kMaxMeasuredTextChars), f);
+    const std::string fontKey = FontCacheKey(f);
+    std::wstring ck(fontKey.begin(), fontKey.end());
+    ck.reserve(ck.size() + 1 + s.size());
+    ck += L"\x1";
+    ck += s;
     auto cit = m_measureCache.find(ck);
     if (cit != m_measureCache.end()) return cit->second;
 

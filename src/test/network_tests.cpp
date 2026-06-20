@@ -39,5 +39,13 @@ TestResult RunNetworkTests() {
             result);
     }
 
+    {
+        const std::string bing = "https://www.bing.com/ck/a?x=1&amp;u=a1aHR0cHM6Ly9oZWxpdW0uY29tcHV0ZXIv&amp;ntb=1";
+        ExpectEqual("network/bing-result-link-opens-and-previews-direct-destination",
+            UnwrapBingRedirect(bing) + "\n",
+            "https://helium.computer/\n",
+            result);
+    }
+
     return result;
 }
