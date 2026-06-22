@@ -14,10 +14,14 @@ set(HTTP_ONLY ON CACHE BOOL "" FORCE)
 # Per-OS TLS backend for libcurl
 if (WIN32)
     set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+    set(CURL_USE_SECTRANSP OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
 else ()
     # macOS + Linux both use OpenSSL. SecureTransport is deprecated since macOS
     # 10.15 and pulls in libidn2 which isn't always available on CI runners.
     set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
+    set(CURL_USE_SCHANNEL OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_SECTRANSP OFF CACHE BOOL "" FORCE)
     # Homebrew installs OpenSSL to a non-default path on macOS.
     if (APPLE AND EXISTS "/opt/homebrew/opt/openssl")
         set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl" CACHE PATH "" FORCE)
@@ -25,6 +29,9 @@ else ()
         set(OPENSSL_ROOT_DIR "/usr/local/opt/openssl" CACHE PATH "" FORCE)
     endif ()
 endif ()
+# Disable IDN (libidn2) — not available on all CI runners and not needed.
+set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
+set(CURL_USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(curl
     URL https://github.com/curl/curl/releases/download/curl-8_11_1/curl-8.11.1.tar.xz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
