@@ -13,10 +13,8 @@
 #include <set>
 #include <functional>
 
-struct HitRegion {
-    float       x, y, w, h;
-    std::string href;
-};
+// HitRegion is defined in platform/platform.h (shared across all platforms).
+#include "platform/platform.h"
 
 struct TabEntry {
     std::wstring title;
