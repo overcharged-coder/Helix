@@ -261,22 +261,27 @@ void Renderer::SetZoom(float z) {
 // ─── image loading ────────────────────────────────────────────────────────────
 
 void Renderer::ReceiveImage(const std::string& url, const std::vector<uint8_t>& bytes) {
-    if (!m_wic || !m_rt || bytes.empty()) return;
+    // Every completion, including fetch and decoder failures, must release the
+    // in-flight slot. Otherwise one bad URL is stuck "loading" forever.
+    m_loadingImages.erase(url);
+    auto fail = [&]() { m_failedImages.insert(url); };
+    if (!m_wic || !m_rt || bytes.empty()) { fail(); return; }
     IWICStream* stream = nullptr;
-    if (FAILED(m_wic->CreateStream(&stream))) return;
+    if (FAILED(m_wic->CreateStream(&stream))) { fail(); return; }
     if (FAILED(stream->InitializeFromMemory(
             const_cast<BYTE*>(bytes.data()), (DWORD)bytes.size()))) {
-        stream->Release(); return;
+        stream->Release(); fail(); return;
     }
     IWICBitmapDecoder* dec = nullptr;
     if (FAILED(m_wic->CreateDecoderFromStream(
             stream, nullptr, WICDecodeMetadataCacheOnLoad, &dec))) {
-        stream->Release(); return;
+        stream->Release(); fail(); return;
     }
     IWICBitmapFrameDecode* frame = nullptr;
     if (FAILED(dec->GetFrame(0, &frame))) {
-        dec->Release(); stream->Release(); return;
+        dec->Release(); stream->Release(); fail(); return;
     }
+    bool decoded = false;
     IWICFormatConverter* conv = nullptr;
     if (SUCCEEDED(m_wic->CreateFormatConverter(&conv))) {
         if (SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
@@ -291,12 +296,14 @@ void Renderer::ReceiveImage(const std::string& url, const std::vector<uint8_t>& 
                 // Drop the cached tree so the next paint re-lays-out with the
                 // real dimensions, otherwise loaded images never appear.
                 InvalidateLayout();
+                decoded = true;
             }
         }
         conv->Release();
     }
     frame->Release(); dec->Release(); stream->Release();
-    m_loadingImages.erase(url);
+    if (decoded) m_failedImages.erase(url);
+    else fail();
 }
 
 // ─── tab strip ───────────────────────────────────────────────────────────────
@@ -1698,6 +1705,10 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
         DrawTabStrip(*tabs, tabStripH);
 
     if (doc) {
+        if (m_imageDocKey != doc.get()) {
+            m_imageDocKey = doc.get();
+            m_failedImages.clear();
+        }
         m_curBaseUrl = baseUrl;
         float docH = 0.f;
         // A malformed or pathological page must never take down the browser.

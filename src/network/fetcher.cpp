@@ -83,7 +83,7 @@ static HINTERNET SharedInternetSession() {
     return session;
 }
 
-FetchResult FetchUrl(const std::string& url) {
+FetchResult FetchUrl(const std::string& url, size_t maxResponseBytes) {
     FetchResult r;
 
     if (StartsWithNoCase(url, "data:")) {
@@ -166,9 +166,8 @@ FetchResult FetchUrl(const std::string& url) {
     // Read body
     char buf[8192];
     DWORD bytesRead = 0;
-    static constexpr size_t kMaxResponseBytes = 12 * 1024 * 1024;
     while (InternetReadFile(hReq, buf, sizeof(buf), &bytesRead) && bytesRead) {
-        if (r.body.size() + bytesRead > kMaxResponseBytes) {
+        if (r.body.size() + bytesRead > maxResponseBytes) {
             r.body.clear();
             r.error = "Response exceeds 12 MiB limit";
             InternetCloseHandle(hReq);

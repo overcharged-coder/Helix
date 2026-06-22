@@ -605,14 +605,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_renderer.SetImageRequestCallback([hwnd](std::string url) {
             std::thread([hwnd, url]() {
                 g_imageFetchGate.acquire();
-                auto res = FetchUrl(url);
+                auto res = FetchUrl(url, 32 * 1024 * 1024);
                 g_imageFetchGate.release();
+                auto* m = new ImageMsg;
+                m->url = url;
                 if (res.success && !res.body.empty()) {
-                    auto* m = new ImageMsg;
-                    m->url   = url;
                     m->bytes = std::vector<uint8_t>(res.body.begin(), res.body.end());
-                    PostMessageW(hwnd, WM_IMAGE_READY, 0, (LPARAM)m);
                 }
+                PostMessageW(hwnd, WM_IMAGE_READY, 0, (LPARAM)m);
             }).detach();
         });
 

@@ -100,6 +100,8 @@ private:
 
     std::map<std::string, ID2D1Bitmap*> m_images;
     std::set<std::string>               m_loadingImages;
+    std::set<std::string>               m_failedImages;
+    const Node*                         m_imageDocKey = nullptr;
     std::function<void(std::string)>    m_imageRequestCb;
 
     std::vector<ID2D1SolidColorBrush*>  m_tempBrushes;

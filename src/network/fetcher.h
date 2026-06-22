@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <string>
 
 struct FetchResult {
@@ -12,4 +13,5 @@ struct FetchResult {
 
 // Fetch a URL over HTTP or HTTPS using WinINet.
 // Follows redirects automatically.
-FetchResult FetchUrl(const std::string& url);
+FetchResult FetchUrl(const std::string& url,
+                     size_t maxResponseBytes = 12 * 1024 * 1024);
