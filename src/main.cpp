@@ -233,90 +233,65 @@ static const std::string kHomeHtml = R"html(<!DOCTYPE html>
 <html>
 <head><title>Helix</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    font-family: 'Segoe UI', system-ui, sans-serif;
     background: #0a0a0a;
     color: #e0e0e0;
-    padding: 60px 40px;
+    margin: 0;
+    padding: 60px 20%;
     line-height: 1.6;
 }
-.hero { text-align: center; padding: 40px 0 50px; }
-.hero h1 {
-    font-size: 42px;
-    color: #ffffff;
-    margin-bottom: 8px;
-    letter-spacing: -1px;
-}
-.hero .accent { color: #6c63ff; }
-.hero p { font-size: 16px; color: #888; margin-top: 6px; }
-.links {
-    max-width: 600px;
-    margin: 0 auto;
-    padding: 30px 0;
-}
+h1 { font-size: 40px; color: #fff; text-align: center; margin-bottom: 4px; }
+.accent { color: #6c63ff; }
+.sub { text-align: center; color: #888; font-size: 15px; }
+.sub2 { text-align: center; color: #555; font-size: 13px; margin-top: 4px; }
+.links { padding: 30px 0; }
 .links a {
     display: block;
     background: #161616;
     border: 1px solid #2a2a2a;
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 14px 20px;
     margin: 8px 0;
     text-decoration: none;
     color: #d0d0d0;
     font-size: 15px;
 }
-.links a:hover { border-color: #6c63ff; background: #1a1a2e; }
-.links .url { color: #666; font-size: 12px; }
-.section {
-    max-width: 600px;
-    margin: 30px auto 0;
-    padding: 20px 0;
-    border-top: 1px solid #1e1e1e;
-}
-.section h3 { font-size: 14px; color: #6c63ff; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; }
-.key { display: block; padding: 4px 0; color: #999; font-size: 13px; }
-.key strong { color: #ccc; }
-.footer { max-width: 600px; margin: 40px auto 0; padding-top: 20px; border-top: 1px solid #1e1e1e; text-align: center; }
-.footer p { font-size: 12px; color: #444; }
-.tag { display: inline-block; background: #1a1a2e; color: #6c63ff; border-radius: 4px; padding: 2px 8px; font-size: 11px; margin-left: 6px; }
+.url { color: #555; font-size: 12px; }
+.sep { border-top: 1px solid #1e1e1e; padding-top: 20px; margin-top: 20px; }
+h3 { font-size: 13px; color: #6c63ff; margin-bottom: 12px; }
+.key { display: block; padding: 3px 0; color: #888; font-size: 13px; }
+.key strong { color: #bbb; }
+.ft { border-top: 1px solid #1e1e1e; margin-top: 30px; padding-top: 20px; text-align: center; }
+.ft p { font-size: 12px; color: #444; }
+.tag { background: #1a1a2e; color: #6c63ff; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
 </style>
 </head>
 <body>
-<div class="hero">
-    <h1><span class="accent">&lt;</span>Helix<span class="accent">/&gt;</span></h1>
-    <p>A web browser, built from scratch in C++</p>
-    <p style="font-size:13px;color:#555;margin-top:4px;">No Chromium. No WebView. No shortcuts.</p>
-</div>
+<h1><span class="accent">&lt;</span>Helix<span class="accent">/&gt;</span></h1>
+<p class="sub">A web browser, built from scratch in C++</p>
+<p class="sub2">No Chromium. No WebView. No shortcuts.</p>
 
 <div class="links">
-    <a href="https://en.wikipedia.org/wiki/Main_Page">
-        Wikipedia <span class="url">en.wikipedia.org</span>
-    </a>
-    <a href="https://news.ycombinator.com">
-        Hacker News <span class="url">news.ycombinator.com</span>
-    </a>
-    <a href="https://lite.cnn.com">
-        CNN Lite <span class="url">lite.cnn.com</span>
-    </a>
-    <a href="helix://history">
-        History <span class="url">helix://history</span>
-    </a>
+<a href="https://en.wikipedia.org/wiki/Main_Page">Wikipedia <span class="url">en.wikipedia.org</span></a>
+<a href="https://news.ycombinator.com">Hacker News <span class="url">news.ycombinator.com</span></a>
+<a href="https://lite.cnn.com">CNN Lite <span class="url">lite.cnn.com</span></a>
+<a href="helix://history">History <span class="url">helix://history</span></a>
 </div>
 
-<div class="section">
-    <h3>Shortcuts</h3>
-    <span class="key"><strong>Ctrl+L</strong> &mdash; address bar</span>
-    <span class="key"><strong>Ctrl+T / W</strong> &mdash; new / close tab</span>
-    <span class="key"><strong>Ctrl+R</strong> &mdash; reload</span>
-    <span class="key"><strong>Ctrl+F</strong> &mdash; find in page</span>
-    <span class="key"><strong>Ctrl++/-</strong> &mdash; zoom</span>
-    <span class="key"><strong>Alt+Left/Right</strong> &mdash; back / forward</span>
+<div class="sep">
+<h3>SHORTCUTS</h3>
+<span class="key"><strong>Ctrl+L</strong> &mdash; address bar</span>
+<span class="key"><strong>Ctrl+T / W</strong> &mdash; new / close tab</span>
+<span class="key"><strong>Ctrl+R</strong> &mdash; reload</span>
+<span class="key"><strong>Ctrl+F</strong> &mdash; find in page</span>
+<span class="key"><strong>Ctrl++/-</strong> &mdash; zoom</span>
+<span class="key"><strong>Alt+Left/Right</strong> &mdash; back / forward</span>
 </div>
 
-<div class="footer">
-    <p>Helix v1.0 <span class="tag">cross-platform</span></p>
-    <p style="margin-top:6px;">HTML &bull; CSS &bull; JS &bull; Layout &bull; Rendering &mdash; all from scratch</p>
+<div class="ft">
+<p>Helix v1.0 <span class="tag">cross-platform</span></p>
+<p style="margin-top:6px;">HTML &bull; CSS &bull; JS &bull; Layout &bull; Rendering &mdash; all from scratch</p>
 </div>
 </body>
 </html>)html";
