@@ -10,29 +10,65 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            configure: cmake -B build -A x64
+            artifact: build/Release/Helix.exe
+          - os: macos-latest
+            name: macos
+            configure: cmake -B build
+            artifact: build/Helix.app
+          - os: ubuntu-latest
+            name: linux
+            configure: cmake -B build
+            artifact: build/Helix
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux deps
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+
       - name: Configure
-        run: cmake -B build -A x64
+        run: ${{ matrix.configure }}
 
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Test
+        run: |
+          cmake --build build --config Release --target helix-layout-engine-tests
+          cmake --build build --config Release --target helix-tests
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $asset = "build/Release/Helix.exe"
+          tag="${GITHUB_REF_NAME}"
+          mv helix-windows/Helix.exe Helix-windows.exe || true
+          mv helix-macos/Helix.app Helix-macos.app || true
+          mv helix-linux/Helix Helix-linux || true
 
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $asset --clobber
-          } else {
-            gh release create $tag $asset --title $tag --generate-notes
-          }
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 && \
+            gh release upload "$tag" Helix-* --repo "$GITHUB_REPOSITORY" --clobber || \
+            gh release create "$tag" Helix-* --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
