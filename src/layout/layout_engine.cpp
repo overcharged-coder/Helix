@@ -1412,11 +1412,24 @@ void Engine::layoutPositioned(LayoutBox& root, std::vector<LayoutBox*>& /*unused
         if (s.minWidth >= 0) w = std::max(w, px(s.minWidth));
         b->contentW = w;
 
-        // Lay out the subtree (block or inline) to learn height.
-        std::vector<LayoutBox*> dummy;
-        {
-            // temporarily compute children with x/y unset; we'll translate after.
-            b->x = 0; b->y = 0;
+        b->x = 0; b->y = 0;  // children laid out relative to origin; translated below
+        if (b->kind == BoxKind::Replaced) {
+            // A positioned image: resolve height from CSS or the intrinsic
+            // aspect ratio (the normal-flow replaced path in layoutBox is never
+            // reached for out-of-flow boxes, so do it here too).
+            float h = usedHeight(s, cbH);
+            if (b->contentW <= 0 && b->intrinsicW > 0) b->contentW = px(b->intrinsicW);
+            if (h < 0) {
+                if (b->intrinsicW > 0 && b->intrinsicH > 0 && b->contentW > 0)
+                    h = b->contentW * (b->intrinsicH / b->intrinsicW);
+                else h = b->intrinsicH > 0 ? px(b->intrinsicH) : 0;
+            }
+            if (s.maxHeight >= 0) h = std::min(h, px(s.maxHeight));
+            if (s.minHeight >= 0) h = std::max(h, px(s.minHeight));
+            b->contentH = h;
+        } else {
+            // Lay out the subtree (block or inline) to learn height.
+            std::vector<LayoutBox*> dummy;
             if (b->establishesInline) {
                 FloatCtx local; local.cbLeft = b->contentX(); local.cbRight = b->contentX() + b->contentW;
                 float h = layoutInline(*b, &local);
