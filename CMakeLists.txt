@@ -83,6 +83,7 @@ if (WIN32)
     endif()
 elseif (APPLE)
     add_executable(Helix MACOSX_BUNDLE
+        src/platform/main_macos.mm
         src/platform/platform_macos.mm
     )
     target_include_directories(Helix PRIVATE src)
@@ -92,10 +93,15 @@ elseif (APPLE)
         "-framework CoreGraphics"
         "-framework CoreText"
     )
+    set_target_properties(Helix PROPERTIES
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.helix.browser"
+        MACOSX_BUNDLE_BUNDLE_NAME "Helix"
+    )
 elseif (UNIX)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     add_executable(Helix
+        src/platform/main_linux.cpp
         src/platform/platform_linux.cpp
     )
     target_include_directories(Helix PRIVATE src ${GTK3_INCLUDE_DIRS})
