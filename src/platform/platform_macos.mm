@@ -81,8 +81,9 @@ public:
             switch ([path elementAtIndex:i associatedPoints:pts]) {
                 case NSBezierPathElementMoveTo:    CGPathMoveToPoint(cgPath, NULL, pts[0].x, pts[0].y); break;
                 case NSBezierPathElementLineTo:    CGPathAddLineToPoint(cgPath, NULL, pts[0].x, pts[0].y); break;
-                case NSBezierPathElementCurveTo:   CGPathAddCurveToPoint(cgPath, NULL, pts[0].x, pts[0].y,
+                case NSBezierPathElementCubicCurveTo: CGPathAddCurveToPoint(cgPath, NULL, pts[0].x, pts[0].y,
                                                        pts[1].x, pts[1].y, pts[2].x, pts[2].y); break;
+                default: break;
                 case NSBezierPathElementClosePath: CGPathCloseSubpath(cgPath); break;
             }
         }

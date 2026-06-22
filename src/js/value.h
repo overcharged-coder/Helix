@@ -35,9 +35,11 @@ struct JsValue {
         JsValue v; v.tag = JsTag::Int32; v.u.i = i; return v;
     }
     static JsValue number(double f) noexcept {
-        if (!std::isnan(f) && !std::isinf(f) &&
-            f == (double)(int32_t)f && !(f == 0.0 && std::signbit(f)))
-            return integer((int32_t)f);
+        if (!std::isnan(f) && !std::isinf(f)) {
+            int32_t i = (int32_t)f;
+            if (f == (double)i && !(f == 0.0 && std::signbit(f)))
+                return integer(i);
+        }
         JsValue v; v.tag = JsTag::Float64; v.u.f = f; return v;
     }
     static JsValue string(JsString* s) noexcept {
