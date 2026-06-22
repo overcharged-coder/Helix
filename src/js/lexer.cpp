@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <cassert>
+#include <algorithm>
 
 static const std::unordered_map<std::string,TT> kKeywords = {
     {"var",TT::Var},{"let",TT::Let},{"const",TT::Const},

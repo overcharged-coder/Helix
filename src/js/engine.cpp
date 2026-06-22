@@ -6,7 +6,7 @@
 #include "js/lexer.h"
 #include "js/parser.h"
 #include "js/compiler.h"
-#include <windows.h>
+#include <cstdio>
 
 #define NATIVE(name) [](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue
 #define ARG(i) (args.size() > (size_t)(i) ? args[i] : JsValue::undefined())
@@ -39,7 +39,7 @@ bool JsEngine::runScript(const std::string& source, const std::string& filename)
     // minified 100KB+ bundles from sites like Amazon.
     constexpr size_t kMaxScriptBytes = 32 * 1024; // 32 KB
     if (source.size() > kMaxScriptBytes) {
-        OutputDebugStringA(("[JS] Skipping large script in " + filename + "\n").c_str());
+        fprintf(stderr, "%s",("[JS] Skipping large script in " + filename + "\n").c_str());
         return false;
     }
     try {
@@ -53,18 +53,18 @@ bool JsEngine::runScript(const std::string& source, const std::string& filename)
         return true;
     } catch (ParseError& e) {
         std::string msg = "[JS Parse Error] " + std::string(e.what()) + "\n";
-        OutputDebugStringA(msg.c_str());
+        fprintf(stderr, "%s",msg.c_str());
         return false;
     } catch (JsException& e) {
         std::string msg = "[JS Error] " + e.val.toString() + "\n";
-        OutputDebugStringA(msg.c_str());
+        fprintf(stderr, "%s",msg.c_str());
         return false;
     } catch (std::exception& e) {
         std::string msg = "[JS Internal Error] " + std::string(e.what()) + "\n";
-        OutputDebugStringA(msg.c_str());
+        fprintf(stderr, "%s",msg.c_str());
         return false;
     } catch (...) {
-        OutputDebugStringA(("[JS Unknown Error] in " + filename + "\n").c_str());
+        fprintf(stderr, "%s",("[JS Unknown Error] in " + filename + "\n").c_str());
         return false;
     }
 }

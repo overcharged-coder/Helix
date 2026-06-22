@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <sstream>
 #include <chrono>
-#include <windows.h>
+#include <cstdio>
 
 #define NATIVE(name) [](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue
 #define ARG(i) (args.size() > (size_t)(i) ? args[i] : JsValue::undefined())
@@ -740,7 +740,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
 
     // window.alert / confirm / prompt
     vm.setGlobal("alert", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("alert") { OutputDebugStringA(("[ALERT] " + ARG_STR(0) + "\n").c_str()); return JsValue::undefined(); }, "alert")));
+        NATIVE("alert") { fprintf(stderr, "[ALERT] %s\n", ARG_STR(0).c_str()); return JsValue::undefined(); }, "alert")));
     vm.setGlobal("confirm", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("confirm") { return JsValue::boolean(false); }, "confirm")));
     vm.setGlobal("prompt", JsValue::object(vm.gc().newNativeFunction(

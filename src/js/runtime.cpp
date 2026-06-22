@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <random>
-#include <windows.h>
+#include <cstdio>
 
 // ── Helper macros ─────────────────────────────────────────────────────────────
 
@@ -933,7 +933,7 @@ static void registerConsole(VM& vm) {
             std::string s = prefix;
             bool first = true;
             for (auto& a : args) { if (!first) s += " "; first = false; s += a.toString(); }
-            OutputDebugStringA((s + "\n").c_str());
+            fprintf(stderr, "%s",(s + "\n").c_str());
             return JsValue::undefined();
         };
     };
@@ -946,7 +946,7 @@ static void registerConsole(VM& vm) {
         if (!ARG(0).toBool()) {
             std::string msg = "Assertion failed";
             if (args.size() > 1) msg += ": " + ARG_STR(1);
-            OutputDebugStringA((msg + "\n").c_str());
+            fprintf(stderr, "%s",(msg + "\n").c_str());
         }
         return JsValue::undefined();
     });
