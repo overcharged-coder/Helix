@@ -4,8 +4,10 @@
 //
 // Build with: pkg-config --cflags --libs gtk+-3.0
 //
+#define _USE_MATH_DEFINES
 #include "platform/platform.h"
 #include <gtk/gtk.h>
+#include <cmath>
 #include <pango/pangocairo.h>
 #include <cstring>
 #include <algorithm>
