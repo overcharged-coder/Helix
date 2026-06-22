@@ -182,6 +182,16 @@ TestResult RunCssTests() {
     }
 
     {
+        // clamp()/min()/max() resolve against the viewport. At 1000px wide:
+        // clamp(200px,30vw,400px) = clamp(200,300,400) = 300.
+        SetCssViewport(1000.f, 800.f);
+        auto cs = ParseInlineStyle("width: clamp(200px, 30vw, 400px)");
+        char buf[64]; snprintf(buf, sizeof buf, "width=%g\n", cs.width);
+        ExpectEqual("css/values/clamp-resolves-against-viewport",
+            std::string(buf), "width=300\n", result);
+    }
+
+    {
         auto dom = ParseHtml("<html><body><h2 id=\"top\">Hello World!</h2></body></html>");
         auto sheet = ParseStylesheet("#top { font: 2em/24px sans-serif; }");
         auto* node = FindElementById(dom.get(), "top");

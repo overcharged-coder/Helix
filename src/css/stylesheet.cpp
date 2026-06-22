@@ -30,6 +30,36 @@ static float ParseLength(const std::string& raw, float emBase = -1.f) {
     if (low == "inherit" || low == "initial" || low == "unset" || low == "normal") return -1;
     if (low == "none" || low == "auto") return -1;
     if (low == "0") return 0;
+    // clamp(min, val, max) / min(...) / max(...): split top-level comma args.
+    {
+        const char* fn = nullptr;
+        if (low.rfind("clamp(", 0) == 0) fn = "clamp";
+        else if (low.rfind("min(", 0) == 0) fn = "min";
+        else if (low.rfind("max(", 0) == 0) fn = "max";
+        if (fn && low.back() == ')') {
+            size_t open = low.find('(');
+            std::string inner = s.substr(open + 1, s.size() - open - 2);
+            std::vector<float> args;
+            int depth = 0; size_t start = 0; bool ok = true;
+            for (size_t j = 0; j <= inner.size(); ++j) {
+                if (j == inner.size() || (inner[j] == ',' && depth == 0)) {
+                    float v = ParseLength(inner.substr(start, j - start), emBase);
+                    if (v <= -1e5f) { ok = false; break; }
+                    args.push_back(v); start = j + 1;
+                } else if (inner[j] == '(') depth++;
+                else if (inner[j] == ')' && depth > 0) depth--;
+            }
+            if (ok && !args.empty()) {
+                if (std::string(fn) == "clamp" && args.size() == 3)
+                    return std::max(args[0], std::min(args[1], args[2]));
+                if (std::string(fn) == "min")
+                    return *std::min_element(args.begin(), args.end());
+                if (std::string(fn) == "max")
+                    return *std::max_element(args.begin(), args.end());
+            }
+            return -1;
+        }
+    }
     // calc(): evaluate simple binary expressions like calc(100vw - 40px).
     if (low.rfind("calc(", 0) == 0 && low.back() == ')') {
         std::string inner = s.substr(5, s.size() - 6);
