@@ -56,12 +56,15 @@ std::wstring ToWide(const std::string& s) {
         } else if ((c >> 4) == 0xE && i + 2 < limit) {
             w += (wchar_t)(((c & 0x0F) << 12) | ((s[i+1] & 0x3F) << 6) | (s[i+2] & 0x3F)); i += 3;
         } else if ((c >> 3) == 0x1E && i + 3 < limit) {
-            // surrogate pair
             unsigned int cp = ((c & 0x07) << 18) | ((s[i+1] & 0x3F) << 12)
                             | ((s[i+2] & 0x3F) << 6) | (s[i+3] & 0x3F);
-            cp -= 0x10000;
-            w += (wchar_t)(0xD800 + (cp >> 10));
-            w += (wchar_t)(0xDC00 + (cp & 0x3FF));
+            if constexpr (sizeof(wchar_t) >= 4) {
+                w += (wchar_t)cp;  // 32-bit wchar_t (Linux/macOS): store raw codepoint
+            } else {
+                cp -= 0x10000;     // 16-bit wchar_t (Windows): UTF-16 surrogate pair
+                w += (wchar_t)(0xD800 + (cp >> 10));
+                w += (wchar_t)(0xDC00 + (cp & 0x3FF));
+            }
             i += 4;
         } else { w += L'?'; i += 1; }
     }
