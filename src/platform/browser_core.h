@@ -121,24 +121,61 @@ inline void TabPushHistory(Tab& tab, const std::string& url) {
 inline const std::string& HomePageHtml() {
     static const std::string html = R"html(<!DOCTYPE html>
 <html>
-<head><title>Helix</title></head>
+<head><title>Helix</title>
+<style>
+* { margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    padding: 60px 40px;
+    line-height: 1.6;
+}
+.hero { text-align: center; padding: 40px 0 50px; }
+.hero h1 { font-size: 42px; color: #ffffff; margin-bottom: 8px; }
+.hero .accent { color: #6c63ff; }
+.hero p { font-size: 16px; color: #888; margin-top: 6px; }
+.links { max-width: 600px; margin: 0 auto; padding: 30px 0; }
+.links a {
+    display: block; background: #161616; border: 1px solid #2a2a2a;
+    border-radius: 10px; padding: 14px 20px; margin: 8px 0;
+    text-decoration: none; color: #d0d0d0; font-size: 15px;
+}
+.links .url { color: #666; font-size: 12px; }
+.section { max-width: 600px; margin: 30px auto 0; padding: 20px 0; border-top: 1px solid #1e1e1e; }
+.section h3 { font-size: 14px; color: #6c63ff; margin-bottom: 14px; }
+.key { display: block; padding: 4px 0; color: #999; font-size: 13px; }
+.key strong { color: #ccc; }
+.footer { max-width: 600px; margin: 40px auto 0; padding-top: 20px; border-top: 1px solid #1e1e1e; text-align: center; }
+.footer p { font-size: 12px; color: #444; }
+.tag { display: inline-block; background: #1a1a2e; color: #6c63ff; border-radius: 4px; padding: 2px 8px; font-size: 11px; margin-left: 6px; }
+</style>
+</head>
 <body>
-<h1>Helix</h1>
-<p>Your browser. Built from scratch in C++. No Chromium. No WebView. Everything is yours.</p>
-<hr>
-<h3>Keyboard shortcuts</h3>
-<p><strong>Ctrl+L</strong> &mdash; focus address bar</p>
-<p><strong>Ctrl+T</strong> &mdash; new tab</p>
-<p><strong>Ctrl+W</strong> &mdash; close tab</p>
-<p><strong>Ctrl+Tab</strong> &mdash; next tab</p>
-<p><strong>Ctrl+1&ndash;9</strong> &mdash; switch to tab</p>
-<p><strong>F5 / Ctrl+R</strong> &mdash; reload</p>
-<p><strong>Alt+Left / Alt+Right</strong> &mdash; back / forward</p>
-<p><strong>Ctrl+H</strong> &mdash; history</p>
-<p><strong>Ctrl+= / Ctrl+-</strong> &mdash; zoom in / out</p>
-<p><strong>Ctrl+0</strong> &mdash; reset zoom</p>
-<p><strong>Ctrl+F</strong> &mdash; find in page</p>
-<p><strong>Escape</strong> &mdash; stop loading / close find bar</p>
+<div class="hero">
+    <h1><span class="accent">&lt;</span>Helix<span class="accent">/&gt;</span></h1>
+    <p>A web browser, built from scratch in C++</p>
+    <p style="font-size:13px;color:#555;margin-top:4px;">No Chromium. No WebView. No shortcuts.</p>
+</div>
+<div class="links">
+    <a href="https://en.wikipedia.org/wiki/Main_Page">Wikipedia <span class="url">en.wikipedia.org</span></a>
+    <a href="https://news.ycombinator.com">Hacker News <span class="url">news.ycombinator.com</span></a>
+    <a href="https://lite.cnn.com">CNN Lite <span class="url">lite.cnn.com</span></a>
+    <a href="helix://history">History <span class="url">helix://history</span></a>
+</div>
+<div class="section">
+    <h3>Shortcuts</h3>
+    <span class="key"><strong>Ctrl+L</strong> &mdash; address bar</span>
+    <span class="key"><strong>Ctrl+T / W</strong> &mdash; new / close tab</span>
+    <span class="key"><strong>Ctrl+R</strong> &mdash; reload</span>
+    <span class="key"><strong>Ctrl+F</strong> &mdash; find in page</span>
+    <span class="key"><strong>Ctrl++/-</strong> &mdash; zoom</span>
+    <span class="key"><strong>Alt+Left/Right</strong> &mdash; back / forward</span>
+</div>
+<div class="footer">
+    <p>Helix v1.0 <span class="tag">cross-platform</span></p>
+    <p style="margin-top:6px;">HTML &bull; CSS &bull; JS &bull; Layout &bull; Rendering &mdash; all from scratch</p>
+</div>
 </body>
 </html>)html";
     return html;
