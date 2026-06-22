@@ -10,6 +10,8 @@
 #include "platform/browser_core.h"
 #include "platform/box_painter.h"
 #include "platform/plat_text_measure.h"
+#include "third_party/stb_image.h"
+#include <set>
 #include "layout/layout_engine.h"
 #include "css/stylesheet.h"
 
@@ -29,12 +31,67 @@ static std::unique_ptr<IPlatformRenderer> g_renderer;
 static std::unique_ptr<PlatTextMeasure> g_measure;
 static std::unique_ptr<LayoutBox> g_layoutRoot;
 static std::map<std::string, PlatBitmap> g_images;
+static std::set<std::string> g_loadingImages;
+static std::set<std::string> g_failedImages;
 static std::map<std::string, PlatFont> g_fontCache;
 
 static Tab& CurTab() { return g_tabs[g_activeTab]; }
 
-// Forward-declare the Linux renderer's SetCairo method (defined in platform_linux.cpp).
-class LinuxRenderer;
+// ── image loading pipeline ───────────────────────────────────────────────────
+
+struct LinuxImageMsg {
+    std::string url;
+    std::vector<uint8_t> bytes;
+};
+
+static void ProcessImage(const std::string& url, const std::vector<uint8_t>& bytes) {
+    if (!g_renderer || bytes.empty()) { g_failedImages.insert(url); return; }
+    int w = 0, h = 0, channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &channels, 4);
+    if (!pixels || w <= 0 || h <= 0) { if (pixels) stbi_image_free(pixels); g_failedImages.insert(url); return; }
+    // stb_image outputs RGBA; Cairo wants ARGB32 (BGRA premultiplied on little-endian).
+    for (int i = 0; i < w * h; ++i) {
+        unsigned char* p = pixels + i * 4;
+        unsigned char r = p[0], g = p[1], b = p[2], a = p[3];
+        float af = a / 255.f;
+        p[0] = (unsigned char)(b * af + 0.5f);
+        p[1] = (unsigned char)(g * af + 0.5f);
+        p[2] = (unsigned char)(r * af + 0.5f);
+        p[3] = a;
+    }
+    PlatBitmap bmp = g_renderer->CreateBitmap(w, h, pixels);
+    stbi_image_free(pixels);
+    if (bmp) {
+        auto it = g_images.find(url);
+        if (it != g_images.end() && it->second) g_renderer->ReleaseBitmap(it->second);
+        g_images[url] = bmp;
+        g_measure->loadedImages[url] = { (float)w, (float)h };
+        g_layoutRoot.reset();  // force relayout
+        if (g_drawingArea) gtk_widget_queue_draw(g_drawingArea);
+    } else {
+        g_failedImages.insert(url);
+    }
+}
+
+static void FetchImageAsync(const std::string& url) {
+    if (g_loadingImages.count(url) || g_failedImages.count(url) || g_images.count(url)) return;
+    g_loadingImages.insert(url);
+    std::thread([url]() {
+        g_imageFetchGate.acquire();
+        auto res = FetchUrl(url);
+        g_imageFetchGate.release();
+        auto* msg = new LinuxImageMsg{ url, {} };
+        if (res.success && !res.body.empty())
+            msg->bytes = std::vector<uint8_t>(res.body.begin(), res.body.end());
+        g_idle_add([](gpointer data) -> gboolean {
+            auto* m = static_cast<LinuxImageMsg*>(data);
+            g_loadingImages.erase(m->url);
+            ProcessImage(m->url, m->bytes);
+            delete m;
+            return G_SOURCE_REMOVE;
+        }, msg);
+    }).detach();
+}
 
 static Stylesheet CollectCSS(const Node* root) {
     Stylesheet sheet;
@@ -63,6 +120,7 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
         g_renderer = CreatePlatformRenderer();
         g_renderer->Init(widget);
         g_measure = std::make_unique<PlatTextMeasure>(g_renderer.get());
+        g_measure->onImageRequest = FetchImageAsync;
     }
     g_renderer->Resize(w, h);
     g_renderer->SetNativeContext(cr);
