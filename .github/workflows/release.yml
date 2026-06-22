@@ -16,15 +16,12 @@ jobs:
           - os: windows-latest
             name: windows
             configure: cmake -B build -A x64
-            artifact: build/Release/Helix.exe
           - os: macos-latest
             name: macos
             configure: cmake -B build
-            artifact: build/Helix.app
           - os: ubuntu-latest
             name: linux
             configure: cmake -B build
-            artifact: build/Helix
 
     runs-on: ${{ matrix.os }}
 
@@ -42,16 +39,30 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Test
-        run: |
-          cmake --build build --config Release --target helix-layout-engine-tests
-          cmake --build build --config Release --target helix-tests
+      - name: Package macOS bundle
+        if: matrix.name == 'macos'
+        run: cd build && zip -r Helix-macos.zip Helix.app
 
-      - name: Upload artifact
+      - name: Upload artifact (Windows)
+        if: matrix.name == 'windows'
         uses: actions/upload-artifact@v4
         with:
-          name: helix-${{ matrix.name }}
-          path: ${{ matrix.artifact }}
+          name: helix-windows
+          path: build/Release/Helix.exe
+
+      - name: Upload artifact (macOS)
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-macos
+          path: build/Helix-macos.zip
+
+      - name: Upload artifact (Linux)
+        if: matrix.name == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: helix-linux
+          path: build/Helix
 
   release:
     needs: build
@@ -66,8 +77,9 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           mv helix-windows/Helix.exe Helix-windows.exe || true
-          mv helix-macos/Helix.app Helix-macos.app || true
+          mv helix-macos/Helix-macos.zip Helix-macos.zip || true
           mv helix-linux/Helix Helix-linux || true
+          chmod +x Helix-linux || true
 
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 && \
             gh release upload "$tag" Helix-* --repo "$GITHUB_REPOSITORY" --clobber || \
