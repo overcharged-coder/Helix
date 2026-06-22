@@ -7,6 +7,7 @@
 //
 #include "network/fetcher.h"
 #include "network/url.h"
+#include "network/text_decode.h"
 #include "html/parser.h"
 #include "html/resources.h"
 #include "js/engine.h"
@@ -147,4 +148,76 @@ kbd { background: #eee; border: 1px solid #ccc; border-radius: 3px; padding: 2px
 <strong>Escape</strong> &mdash; stop loading / close find bar</p>
 </body></html>)html";
     return html;
+}
+
+// ── shared helpers for page loading ──────────────────────────────────────────
+
+inline std::string LowerAscii(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) c = (char)std::tolower((unsigned char)c);
+    return out;
+}
+
+inline bool AttrContainsToken(const std::string& value, const std::string& token) {
+    std::string lower = LowerAscii(value);
+    size_t start = 0;
+    while (start < lower.size()) {
+        while (start < lower.size() && std::isspace((unsigned char)lower[start])) ++start;
+        size_t end = start;
+        while (end < lower.size() && !std::isspace((unsigned char)lower[end])) ++end;
+        if (lower.substr(start, end - start) == token) return true;
+        start = end;
+    }
+    return false;
+}
+
+inline bool StylesheetMediaApplies(const std::string& media) {
+    std::string lower = LowerAscii(media);
+    if (lower.empty()) return true;
+    return lower.find("all") != std::string::npos
+        || lower.find("screen") != std::string::npos
+        || lower.find("projection") != std::string::npos;
+}
+
+inline Node* FindFirstElement(Node* root, const std::string& tag) {
+    if (!root) return nullptr;
+    std::vector<Node*> stack{ root };
+    while (!stack.empty()) {
+        Node* n = stack.back();
+        stack.pop_back();
+        if (n->type == NodeType::Element && n->tagName == tag) return n;
+        for (auto it = n->children.rbegin(); it != n->children.rend(); ++it)
+            stack.push_back(it->get());
+    }
+    return nullptr;
+}
+
+inline void LoadExternalStylesheets(const std::shared_ptr<Node>& dom, const std::string& pageUrl) {
+    if (!dom) return;
+    Node* attach = FindFirstElement(dom.get(), "head");
+    if (!attach) attach = dom.get();
+    std::vector<Node*> stack{ dom.get() };
+    int loaded = 0;
+    size_t loadedBytes = 0;
+    while (!stack.empty() && loaded < 8 && loadedBytes < 512 * 1024) {
+        Node* n = stack.back();
+        stack.pop_back();
+        if (n->type == NodeType::Element && n->tagName == "link"
+            && AttrContainsToken(n->attr("rel"), "stylesheet")
+            && StylesheetMediaApplies(n->attr("media"))) {
+            std::string href = ResolveUrlAgainstBase(n->attr("href"), pageUrl);
+            auto res = FetchUrl(href);
+            if (res.success && !res.body.empty()) {
+                loadedBytes += res.body.size();
+                if (loadedBytes <= 512 * 1024) {
+                    auto style = Node::makeElement("style");
+                    style->appendChild(Node::makeText(DecodeTextToUtf8(res.body, res.contentType)));
+                    attach->appendChild(style);
+                    ++loaded;
+                }
+            }
+        }
+        for (auto it = n->children.rbegin(); it != n->children.rend(); ++it)
+            stack.push_back(it->get());
+    }
 }
