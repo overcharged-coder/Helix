@@ -8,10 +8,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)   # Windows TLS backend
 set(CURL_ZLIB OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(HTTP_ONLY ON CACHE BOOL "" FORCE)
+# Per-OS TLS backend for libcurl
+if (WIN32)
+    set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+elseif (APPLE)
+    set(CURL_USE_SECTRANSP ON CACHE BOOL "" FORCE)
+else ()
+    set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
+endif ()
 FetchContent_Declare(curl
     URL https://github.com/curl/curl/releases/download/curl-8_11_1/curl-8.11.1.tar.xz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
