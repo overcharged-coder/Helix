@@ -137,6 +137,14 @@ struct ComputedStyle {
     bool     flexDirectionSet = false;
     float    flexGrow        = 0;
     bool     flexGrowSet     = false;
+    float    flexShrink      = 1;  // default 1 per spec
+    bool     flexShrinkSet   = false;
+    float    flexBasis       = -1; // -1 = auto (falls back to width or max-content)
+    bool     flexBasisSet    = false;
+    int      flexWrap        = 0;  // 0=nowrap, 1=wrap, 2=wrap-reverse
+    bool     flexWrapSet     = false;
+    int      alignSelf       = -1; // -1=auto (inherits align-items), 0..3 same as alignItems
+    bool     alignSelfSet    = false;
     float    flexGap         = -1;
     // align-items on the cross axis: 0=stretch(default),1=start,2=center,3=end
     int      alignItems      = 0;
@@ -267,6 +275,10 @@ struct ComputedStyle {
             out.flexGrow = child.flexGrow;
             out.flexGrowSet = true;
         }
+        if (child.flexShrinkSet) { out.flexShrink = child.flexShrink; out.flexShrinkSet = true; }
+        if (child.flexBasisSet) { out.flexBasis = child.flexBasis; out.flexBasisSet = true; }
+        if (child.flexWrapSet) { out.flexWrap = child.flexWrap; out.flexWrapSet = true; }
+        if (child.alignSelfSet) { out.alignSelf = child.alignSelf; out.alignSelfSet = true; }
         if (child.flexGap >= 0) out.flexGap = child.flexGap;
         if (child.gridTemplateColumnsSet) {
             out.gridTemplateColumns = child.gridTemplateColumns;

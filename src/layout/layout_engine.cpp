@@ -928,10 +928,14 @@ void Engine::layoutFlex(LayoutBox& box, std::vector<LayoutBox*>& positionedOut) 
     if (items.empty()) { box.contentH = 0; return; }
 
     const float gap = px(std::max(0.f, box.style.flexGap));
-    // A definite container height lets items resolve height:% (CSS would
-    // otherwise treat it as auto). -1 when the container's height is auto.
     const float cbHeight = usedHeight(box.style, -1.f);
-    if (box.style.flexDirection == 1) {
+    const bool column = (box.style.flexDirection == 1);
+    const bool wrap = (box.style.flexWrap != 0);
+    const bool wrapReverse = (box.style.flexWrap == 2);
+    const int containerAlign = box.style.alignItems;  // 0=stretch,1=start,2=center,3=end
+
+    // ── column direction: simple vertical stacking ─────────────────────────
+    if (column) {
         float cursorY = box.contentY();
         for (LayoutBox* item : items) {
             item->y = cursorY;
@@ -944,61 +948,126 @@ void Engine::layoutFlex(LayoutBox& box, std::vector<LayoutBox*>& positionedOut) 
         return;
     }
 
-    struct ItemSize { LayoutBox* box; float basis; float grow; };
-    std::vector<ItemSize> sized;
-    float used = gap * std::max(0, (int)items.size() - 1);
-    float growTotal = 0;
+    // ── row direction: flex-wrap, grow, shrink, basis, align-self ───────────
+
+    struct FlexItem { LayoutBox* box; float basis; float grow; float shrink; float extra; };
+
+    // Compute hypothetical main sizes (basis + hExtra).
+    std::vector<FlexItem> allItems;
     for (LayoutBox* item : items) {
-        float basis = usedWidth(item->style, box.contentW);
-        if (basis < 0) basis = maxContent(*item);
+        float basis;
+        if (item->style.flexBasisSet && item->style.flexBasis >= 0)
+            basis = px(item->style.flexBasis);
+        else {
+            basis = usedWidth(item->style, box.contentW);
+            if (basis < 0) basis = maxContent(*item);
+        }
         basis = std::max(0.f, basis);
-        const float grow = item->style.flexGrowSet ? item->style.flexGrow : 0.f;
-        sized.push_back({ item, basis, grow });
-        used += basis + hExtra(item->style);
-        growTotal += grow;
+        float grow = item->style.flexGrowSet ? item->style.flexGrow : 0.f;
+        float shrink = item->style.flexShrinkSet ? item->style.flexShrink : 1.f;
+        float extra = hExtra(item->style);
+        allItems.push_back({ item, basis, grow, shrink, extra });
     }
 
-    const float free = std::max(0.f, box.contentW - used);
-    float cursorX = box.contentX();
-    float maxH = 0;
-    for (const auto& item : sized) {
-        LayoutBox& child = *item.box;
-        const float width = item.basis + (growTotal > 0 ? free * item.grow / growTotal : 0.f);
-        const float marginLeft = child.style.marginLeftSet() && !child.style.isMarginAuto(child.style.marginLeft)
-            ? px(child.style.marginLeft) : 0.f;
-        const float oldWidth = child.style.width;
-        const float oldPercent = child.style.widthPercent;
-        child.style.width = width / std::max(0.01f, Z);
-        child.style.widthPercent = -1;
-        child.y = box.contentY();
-        std::vector<LayoutBox*> positioned;
-        layoutBox(child, cursorX - marginLeft, box.contentW, cbHeight, positioned, nullptr);
-        for (auto* p : positioned) positionedOut.push_back(p);
-        child.style.width = oldWidth;
-        child.style.widthPercent = oldPercent;
-        cursorX += child.marginBoxW() + gap;
-        maxH = std::max(maxH, child.marginBoxH());
+    // Split items into flex lines (all on one line if nowrap).
+    struct FlexLine { std::vector<size_t> indices; float maxH = 0; float lineY = 0; };
+    std::vector<FlexLine> lines;
+    {
+        FlexLine cur;
+        float lineUsed = 0;
+        for (size_t i = 0; i < allItems.size(); ++i) {
+            float itemMain = allItems[i].basis + allItems[i].extra;
+            float gapBefore = cur.indices.empty() ? 0 : gap;
+            if (wrap && !cur.indices.empty() && (lineUsed + gapBefore + itemMain) > box.contentW) {
+                lines.push_back(std::move(cur));
+                cur = FlexLine{};
+                lineUsed = 0;
+                gapBefore = 0;
+            }
+            cur.indices.push_back(i);
+            lineUsed += gapBefore + itemMain;
+        }
+        if (!cur.indices.empty()) lines.push_back(std::move(cur));
     }
 
-    // Cross-axis line height = explicit container height if set, else tallest item.
+    // Layout each flex line.
+    float cursorY = box.contentY();
+    for (FlexLine& line : lines) {
+        float used = gap * std::max(0, (int)line.indices.size() - 1);
+        float growTotal = 0, shrinkTotal = 0;
+        for (size_t idx : line.indices) {
+            used += allItems[idx].basis + allItems[idx].extra;
+            growTotal += allItems[idx].grow;
+            shrinkTotal += allItems[idx].shrink;
+        }
+
+        float slack = box.contentW - used;  // positive = free space, negative = overflow
+        float cursorX = box.contentX();
+
+        for (size_t idx : line.indices) {
+            FlexItem& fi = allItems[idx];
+            LayoutBox& child = *fi.box;
+
+            float w = fi.basis;
+            if (slack > 0 && growTotal > 0)
+                w += slack * fi.grow / growTotal;
+            else if (slack < 0 && shrinkTotal > 0)
+                w += slack * fi.shrink / shrinkTotal;
+            w = std::max(0.f, w);
+
+            float marginLeft = child.style.marginLeftSet() && !child.style.isMarginAuto(child.style.marginLeft)
+                ? px(child.style.marginLeft) : 0.f;
+            const float oldWidth = child.style.width;
+            const float oldPercent = child.style.widthPercent;
+            child.style.width = w / std::max(0.01f, Z);
+            child.style.widthPercent = -1;
+            child.y = cursorY;
+            std::vector<LayoutBox*> positioned;
+            layoutBox(child, cursorX - marginLeft, box.contentW, cbHeight, positioned, nullptr);
+            for (auto* p : positioned) positionedOut.push_back(p);
+            child.style.width = oldWidth;
+            child.style.widthPercent = oldPercent;
+            cursorX += child.marginBoxW() + gap;
+            line.maxH = std::max(line.maxH, child.marginBoxH());
+        }
+
+        line.lineY = cursorY;
+
+        // Cross-axis alignment for this line.
+        float lineH = line.maxH;
+        for (size_t idx : line.indices) {
+            LayoutBox& child = *allItems[idx].box;
+            int align = (child.style.alignSelfSet && child.style.alignSelf >= 0)
+                      ? child.style.alignSelf : containerAlign;
+            float boxH = child.marginBoxH();
+            if (align == 0) {
+                if (child.style.height < 0 && child.style.heightPercent < 0
+                    && child.kind != BoxKind::Replaced && boxH < lineH)
+                    child.contentH += (lineH - boxH);
+            } else if (align == 2) {
+                TranslateSubtree(child, 0.f, (lineH - boxH) / 2.f);
+            } else if (align == 3) {
+                TranslateSubtree(child, 0.f, lineH - boxH);
+            }
+        }
+
+        cursorY += lineH + gap;
+    }
+
+    float totalH = std::max(0.f, cursorY - box.contentY() - gap);
     float crossH = usedHeight(box.style, -1.f);
-    if (crossH < 0) crossH = maxH;
-    box.contentH = crossH;
+    box.contentH = crossH >= 0 ? crossH : totalH;
 
-    // align-items on the cross axis (default stretch).
-    const int align = box.style.alignItems;  // 0=stretch,1=start,2=center,3=end
-    for (const auto& item : sized) {
-        LayoutBox& child = *item.box;
-        const float boxH = child.marginBoxH();
-        if (align == 0) {
-            // Stretch auto-height, non-replaced items to fill the line.
-            if (child.style.height < 0 && child.style.heightPercent < 0
-                && child.kind != BoxKind::Replaced && boxH < crossH)
-                child.contentH += (crossH - boxH);
-        } else if (align == 2) {        // center
-            TranslateSubtree(child, 0.f, (crossH - boxH) / 2.f);
-        } else if (align == 3) {        // end
-            TranslateSubtree(child, 0.f, crossH - boxH);
+    // wrap-reverse: flip line order vertically.
+    if (wrapReverse && lines.size() > 1) {
+        float top = box.contentY();
+        float bottom = top + box.contentH;
+        for (auto& line : lines) {
+            float lineBottom = line.lineY + line.maxH;
+            float mirrorY = bottom - (lineBottom - top);
+            float dy = mirrorY - line.lineY;
+            for (size_t idx : line.indices)
+                TranslateSubtree(*allItems[idx].box, 0.f, dy);
         }
     }
 }

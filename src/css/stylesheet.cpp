@@ -673,18 +673,59 @@ static void ApplyDeclaration(const std::string& prop,
                            : (v == "flex-end" || v == "end") ? 2
                            : (v == "space-between") ? 3 : 0;
     } else if (prop == "flex-grow") {
-        try {
-            out.flexGrow = std::max(0.f, std::stof(sTrim(val)));
-            out.flexGrowSet = true;
-        } catch (...) {}
+        try { out.flexGrow = std::max(0.f, std::stof(sTrim(val))); out.flexGrowSet = true; } catch (...) {}
+    } else if (prop == "flex-shrink") {
+        try { out.flexShrink = std::max(0.f, std::stof(sTrim(val))); out.flexShrinkSet = true; } catch (...) {}
+    } else if (prop == "flex-basis") {
+        std::string v = sLower(sTrim(val));
+        if (v == "auto") { out.flexBasis = -1; out.flexBasisSet = true; }
+        else { float f = ParseLength(val); if (f > -1e5f) { out.flexBasis = f; out.flexBasisSet = true; } }
+    } else if (prop == "flex-wrap") {
+        std::string v = sLower(sTrim(val));
+        out.flexWrapSet = true;
+        if (v == "wrap") out.flexWrap = 1;
+        else if (v == "wrap-reverse") out.flexWrap = 2;
+        else out.flexWrap = 0;
+    } else if (prop == "align-self") {
+        std::string v = sLower(sTrim(val));
+        out.alignSelfSet = true;
+        if (v == "auto") out.alignSelf = -1;
+        else if (v == "flex-start" || v == "start") out.alignSelf = 1;
+        else if (v == "center") out.alignSelf = 2;
+        else if (v == "flex-end" || v == "end") out.alignSelf = 3;
+        else out.alignSelf = 0;  // stretch
     } else if (prop == "flex") {
+        // flex shorthand: <grow> [<shrink> [<basis>]]
         std::istringstream values(val);
-        std::string grow;
-        values >> grow;
-        try {
-            out.flexGrow = std::max(0.f, std::stof(grow));
-            out.flexGrowSet = true;
-        } catch (...) {}
+        std::string g, s, b;
+        values >> g;
+        std::string gl = sLower(g);
+        if (gl == "none") { out.flexGrow = 0; out.flexShrink = 0; out.flexGrowSet = out.flexShrinkSet = true; }
+        else if (gl == "auto") { out.flexGrow = 1; out.flexShrink = 1; out.flexBasis = -1; out.flexGrowSet = out.flexShrinkSet = out.flexBasisSet = true; }
+        else {
+            try { out.flexGrow = std::max(0.f, std::stof(g)); out.flexGrowSet = true; } catch (...) {}
+            if (values >> s) {
+                try { out.flexShrink = std::max(0.f, std::stof(s)); out.flexShrinkSet = true; } catch (...) {}
+            }
+            if (values >> b) {
+                std::string bl = sLower(b);
+                if (bl == "auto") { out.flexBasis = -1; out.flexBasisSet = true; }
+                else { float f = ParseLength(b); if (f > -1e5f) { out.flexBasis = f; out.flexBasisSet = true; } }
+            }
+            // flex: <n> with no basis implies basis=0 per spec
+            if (out.flexGrowSet && !out.flexBasisSet) { out.flexBasis = 0; out.flexBasisSet = true; }
+        }
+    } else if (prop == "flex-flow") {
+        // flex-flow: <direction> || <wrap>
+        std::istringstream values(val);
+        std::string tok;
+        while (values >> tok) {
+            std::string tl = sLower(tok);
+            if (tl == "row" || tl == "column") { out.flexDirection = (tl == "column") ? 1 : 0; out.flexDirectionSet = true; }
+            else if (tl == "wrap") { out.flexWrap = 1; out.flexWrapSet = true; }
+            else if (tl == "wrap-reverse") { out.flexWrap = 2; out.flexWrapSet = true; }
+            else if (tl == "nowrap") { out.flexWrap = 0; out.flexWrapSet = true; }
+        }
     } else if (prop == "gap") {
         std::istringstream values(val);
         std::string gap;
