@@ -13,3 +13,6 @@ void registerDom(VM& vm, std::shared_ptr<Node> document,
 
 // Retrieve the Node* from a DOM wrapper JsObject (nullptr if not a DOM object).
 Node* unwrapNode(JsValue val);
+
+// Dispatch an event (e.g. "click") on a DOM node, calling registered listeners.
+void dispatchDomEvent(VM& vm, Node* target, const std::string& eventName);

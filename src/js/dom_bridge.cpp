@@ -39,6 +39,10 @@ static bool classHas(const std::vector<std::string>& toks, const std::string& t)
 
 static std::unordered_map<Node*, std::shared_ptr<Node>> g_nodeStore;
 static std::unordered_map<Node*, JsObject*> g_wrapperStore;
+
+// Event listeners: node -> [(eventName, callbackFn), ...]
+struct EventListener { std::string event; JsValue fn; };
+static std::unordered_map<Node*, std::vector<EventListener>> g_eventListeners;
 // Persistent GC roots for cached DOM wrappers. These live at STABLE heap
 // addresses so the GC can mark them safely (rooting a stack local was a
 // use-after-return bug). Cleared per document in registerDom().
@@ -475,20 +479,22 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         return wrapNode(vm, newNode);
     });
 
-    // Event listeners (simplified: store them, no real dispatch)
-    {
-        auto* listeners = vm.gc().newObject(ObjKind::Plain);
-        obj->setProp("__listeners__", JsValue::object(listeners));
-    }
     addNativeM("addEventListener", NATIVE("addEventListener") {
         Node* n = unwrapNode(thisVal);
-        if (!n || args.size() < 2) return JsValue::undefined();
-        std::string ev = ARG_STR(0);
-        // Store listener on the DOM node attrs (simplified)
-        n->attrs["__on" + ev + "__"] = "1";
+        if (!n || args.size() < 2 || !ARG(1).isCallable()) return JsValue::undefined();
+        g_eventListeners[n].push_back({ ARG_STR(0), ARG(1) });
         return JsValue::undefined();
     });
     addNativeM("removeEventListener", NATIVE("removeEventListener") {
+        Node* n = unwrapNode(thisVal);
+        if (!n || args.size() < 2) return JsValue::undefined();
+        std::string ev = ARG_STR(0);
+        auto it = g_eventListeners.find(n);
+        if (it != g_eventListeners.end()) {
+            auto& list = it->second;
+            for (auto li = list.begin(); li != list.end(); ++li)
+                if (li->event == ev) { list.erase(li); break; }
+        }
         return JsValue::undefined();
     });
     addNativeM("dispatchEvent", NATIVE("dispatchEvent") {
@@ -655,6 +661,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     for (auto& r : g_wrapperRoots) vm.gc().removeRoot(r.get());
     g_wrapperRoots.clear();
     g_wrapperStore.clear();
+    g_eventListeners.clear();
 
     JsValue docVal = wrapNode(vm, docNode);
     vm.setGlobal("document", docVal);
@@ -816,4 +823,33 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     makeEventCtor("TouchEvent");
     makeEventCtor("DragEvent");
     makeEventCtor("SubmitEvent");
+}
+
+void dispatchDomEvent(VM& vm, Node* target, const std::string& eventName) {
+    if (!target) return;
+    // Build a minimal event object.
+    auto* ev = vm.gc().newObject(ObjKind::Plain);
+    ev->setProp("type", vm.str(eventName));
+    ev->setProp("target", wrapNode(vm, getShared(target) ? getShared(target)
+                                       : std::shared_ptr<Node>(target, [](Node*){})));
+    ev->setProp("preventDefault", JsValue::object(vm.gc().newNativeFunction(
+        [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "preventDefault")));
+    ev->setProp("stopPropagation", JsValue::object(vm.gc().newNativeFunction(
+        [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "stopPropagation")));
+    JsValue evVal = JsValue::object(ev);
+
+    // Walk from target up through ancestors (bubble phase).
+    Node* cur = target;
+    while (cur) {
+        auto it = g_eventListeners.find(cur);
+        if (it != g_eventListeners.end()) {
+            for (auto& listener : it->second) {
+                if (listener.event == eventName) {
+                    try { vm.call(listener.fn, JsValue::undefined(), { evVal }); }
+                    catch (...) {}
+                }
+            }
+        }
+        cur = cur->parent;
+    }
 }
