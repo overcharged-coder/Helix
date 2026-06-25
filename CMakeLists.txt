@@ -4,6 +4,24 @@ project(Helix VERSION 0.1.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Derive version from the latest git tag (e.g. "v1.3.2" -> "1.3.2").
+# Falls back to "0.0.0" if not in a git repo or no tags exist.
+execute_process(
+    COMMAND git describe --tags --abbrev=0
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_TAG
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_TAG_RESULT
+)
+if (GIT_TAG_RESULT EQUAL 0 AND GIT_TAG MATCHES "^v?(.+)$")
+    string(REGEX REPLACE "^v" "" HELIX_VERSION "${GIT_TAG}")
+else ()
+    set(HELIX_VERSION "0.0.0")
+endif ()
+message(STATUS "Helix version: ${HELIX_VERSION}")
+add_compile_definitions(HELIX_VERSION="${HELIX_VERSION}")
+
 # ── libcurl (cross-platform HTTP) ─────────────────────────────────────────────
 # Try system-installed libcurl first (apt install libcurl4-openssl-dev, brew
 # install curl, etc.). Fall back to FetchContent download if not found.
