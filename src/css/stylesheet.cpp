@@ -110,7 +110,8 @@ static float ParseLength(const std::string& raw, float emBase = -1.f) {
     std::string unit = low.substr(i);
     while (!unit.empty() && unit[0] == ' ') unit.erase(unit.begin());
     if (unit.empty() || unit == "px") return num;
-    if (unit == "em" || unit == "rem") return num * emBase;
+    if (unit == "em") return num * emBase;
+    if (unit == "rem") return num * 16.f;  // rem always resolves against root font size (16px)
     if (unit == "pt")  return num * 1.333f;
     if (unit == "pc")  return num * emBase;
     if (unit == "in")  return num * 96.f;
@@ -1165,29 +1166,37 @@ static void ApplyDeclaration(const std::string& prop,
         std::string v = sTrim(val);
         if (sLower(v) != "auto" && sLower(v) != "inherit" && sLower(v) != "initial" && sLower(v) != "unset") {
             out.topSet = true;
-            if (!v.empty() && v.back() == '%') { out.top = ParseLength(v); out.topPercent = true; }
-            else { out.top = ParseLength(v); out.topPercent = false; }
+            if (!v.empty() && v.back() == '%') {
+                try { out.top = std::stof(v.substr(0, v.size()-1)); } catch(...) { out.top = 0; }
+                out.topPercent = true;
+            } else { out.top = ParseLength(v); out.topPercent = false; }
         }
     } else if (prop == "right") {
         std::string v = sTrim(val);
         if (sLower(v) != "auto" && sLower(v) != "inherit" && sLower(v) != "initial" && sLower(v) != "unset") {
             out.rightSet = true;
-            if (!v.empty() && v.back() == '%') { out.right = ParseLength(v); out.rightPercent = true; }
-            else { out.right = ParseLength(v); out.rightPercent = false; }
+            if (!v.empty() && v.back() == '%') {
+                try { out.right = std::stof(v.substr(0, v.size()-1)); } catch(...) { out.right = 0; }
+                out.rightPercent = true;
+            } else { out.right = ParseLength(v); out.rightPercent = false; }
         }
     } else if (prop == "bottom") {
         std::string v = sTrim(val);
         if (sLower(v) != "auto" && sLower(v) != "inherit" && sLower(v) != "initial" && sLower(v) != "unset") {
             out.bottomSet = true;
-            if (!v.empty() && v.back() == '%') { out.bottom = ParseLength(v); out.bottomPercent = true; }
-            else { out.bottom = ParseLength(v); out.bottomPercent = false; }
+            if (!v.empty() && v.back() == '%') {
+                try { out.bottom = std::stof(v.substr(0, v.size()-1)); } catch(...) { out.bottom = 0; }
+                out.bottomPercent = true;
+            } else { out.bottom = ParseLength(v); out.bottomPercent = false; }
         }
     } else if (prop == "left") {
         std::string v = sTrim(val);
         if (sLower(v) != "auto" && sLower(v) != "inherit" && sLower(v) != "initial" && sLower(v) != "unset") {
             out.leftSet = true;
-            if (!v.empty() && v.back() == '%') { out.left = ParseLength(v); out.leftPercent = true; }
-            else { out.left = ParseLength(v); out.leftPercent = false; }
+            if (!v.empty() && v.back() == '%') {
+                try { out.left = std::stof(v.substr(0, v.size()-1)); } catch(...) { out.left = 0; }
+                out.leftPercent = true;
+            } else { out.left = ParseLength(v); out.leftPercent = false; }
         }
     } else if (prop == "opacity") {
         try { out.opacity = std::stof(sTrim(val)); out.opacitySet = true; } catch (...) {}
