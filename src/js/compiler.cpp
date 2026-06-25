@@ -662,6 +662,31 @@ uint8_t Compiler::compileTernary(const TernaryExpr& e, int hint) {
 uint8_t Compiler::compileMember(const MemberExpr& e, int hint) {
     uint8_t dst = (hint >= 0) ? (uint8_t)hint : allocReg();
     uint8_t obj = compileExpr(*e.obj);
+    // Optional chaining (?.) — if obj is null/undefined, produce undefined
+    // instead of throwing a TypeError on property access.
+    int skipJump = -1;
+    if (e.optional) {
+        // OP_JUMP_NULLISH jumps when NOT null/undefined (for ??).
+        // For ?. we want: if NOT nullish → jump to property access; else load undef.
+        emit(OP_MOVE, dst, obj);
+        int notNullJump = m_fn->emitJump(OP_JUMP_NULLISH, dst);
+        // IS nullish: load undefined, skip property access.
+        emit(OP_LOAD_UNDEF, dst);
+        skipJump = m_fn->emitJump(OP_JUMP);
+        // NOT nullish: do the property access.
+        m_fn->patchJump(notNullJump);
+        if (e.computed) {
+            uint8_t key = compileExpr(*e.prop);
+            emit(OP_GET_PROP, dst, obj, key);
+            freeReg(key);
+        } else {
+            auto& lit = e.prop->as<LiteralExpr>();
+            emitGetStaticProp(dst, obj, lit.strVal, e.prop->line);
+        }
+        m_fn->patchJump(skipJump);
+        freeReg(obj);
+        return dst;
+    }
     if (e.computed) {
         uint8_t key = compileExpr(*e.prop);
         emit(OP_GET_PROP, dst, obj, key);

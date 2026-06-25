@@ -648,6 +648,15 @@ ExprPtr Parser::parseCallMember(ExprPtr base) {
         if (check(TT::Dot) || check(TT::Optional)) {
             bool optional = cur().is(TT::Optional);
             consume();
+            // ?.[expr] — optional computed access
+            if (optional && check(TT::LBracket)) {
+                consume(); // eat [
+                auto idx = parseExpr();
+                expect(TT::RBracket,"expected ']'");
+                base = std::make_unique<Expr>(MemberExpr{std::move(base), std::move(idx), true, true}, ln);
+                continue;
+            }
+            // ?.prop or .prop
             std::string prop;
             if (check(TT::Ident) || cur().isKeyword()) prop = consume().value;
             else throw ParseError("expected property name", line());

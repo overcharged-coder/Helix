@@ -607,7 +607,7 @@ JsValue VM::runFrame(CallFrame& frame) {
             if (!REG(ins.a).toBool()) frame.pc += ins.sbc();
             break;
         case OP_JUMP_NULLISH:
-            if (REG(ins.a).isNullOrUndefined()) frame.pc += ins.sbc();
+            if (!REG(ins.a).isNullOrUndefined()) frame.pc += ins.sbc();
             break;
         case OP_JUMP_TRUE_POP:
             if (REG(ins.a).toBool()) frame.pc += ins.sbc();

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <random>
+#include <regex>
 #include <cstdio>
 
 // ── Helper macros ─────────────────────────────────────────────────────────────
@@ -586,6 +587,73 @@ static void registerString(VM& vm) {
         result += s.substr(pos);
         return vm.str(result);
     });
+    addNative(vm, proto, "match", NATIVE("match") {
+        std::string s = getStr(thisVal);
+        if (ARG(0).isObject() && ARG(0).asObject()->kind == ObjKind::RegExp) {
+            std::string pattern = ARG(0).asObject()->getProp("source").toString();
+            std::string flags   = ARG(0).asObject()->getProp("flags").toString();
+            try {
+                auto rxFlags = std::regex_constants::ECMAScript;
+                if (flags.find('i') != std::string::npos) rxFlags |= std::regex_constants::icase;
+                std::regex rx(pattern, rxFlags);
+                bool global = (flags.find('g') != std::string::npos);
+                if (global) {
+                    auto* arr = vm.gc().newArray();
+                    auto it = std::sregex_iterator(s.begin(), s.end(), rx);
+                    for (; it != std::sregex_iterator(); ++it) arr->arrayPush(vm.str((*it)[0].str()));
+                    return arr->arrayLength() > 0 ? JsValue::object(arr) : JsValue::null();
+                } else {
+                    std::smatch m;
+                    if (!std::regex_search(s, m, rx)) return JsValue::null();
+                    auto* arr = vm.gc().newArray();
+                    for (size_t i = 0; i < m.size(); ++i) arr->arrayPush(vm.str(m[i].str()));
+                    arr->setProp("index", JsValue::integer((int32_t)m.position(0)));
+                    return JsValue::object(arr);
+                }
+            } catch (...) { return JsValue::null(); }
+        }
+        std::string pat = ARG_STR(0);
+        auto pos = s.find(pat);
+        if (pos == std::string::npos) return JsValue::null();
+        auto* arr = vm.gc().newArray();
+        arr->arrayPush(vm.str(pat));
+        arr->setProp("index", JsValue::integer((int32_t)pos));
+        return JsValue::object(arr);
+    });
+    addNative(vm, proto, "search", NATIVE("search") {
+        std::string s = getStr(thisVal);
+        std::string pat = ARG_STR(0);
+        try {
+            std::regex rx(pat, std::regex_constants::ECMAScript);
+            std::smatch m;
+            if (std::regex_search(s, m, rx)) return JsValue::integer((int32_t)m.position(0));
+        } catch (...) {
+            auto pos = s.find(pat);
+            if (pos != std::string::npos) return JsValue::integer((int32_t)pos);
+        }
+        return JsValue::integer(-1);
+    });
+    addNative(vm, proto, "matchAll", NATIVE("matchAll") {
+        auto* arr = vm.gc().newArray();
+        std::string s = getStr(thisVal);
+        if (ARG(0).isObject() && ARG(0).asObject()->kind == ObjKind::RegExp) {
+            std::string pattern = ARG(0).asObject()->getProp("source").toString();
+            std::string flags   = ARG(0).asObject()->getProp("flags").toString();
+            try {
+                auto rxFlags = std::regex_constants::ECMAScript;
+                if (flags.find('i') != std::string::npos) rxFlags |= std::regex_constants::icase;
+                std::regex rx(pattern, rxFlags);
+                auto it = std::sregex_iterator(s.begin(), s.end(), rx);
+                for (; it != std::sregex_iterator(); ++it) {
+                    auto* m = vm.gc().newArray();
+                    for (size_t i = 0; i < it->size(); ++i) m->arrayPush(vm.str((*it)[i].str()));
+                    m->setProp("index", JsValue::integer((int32_t)it->position(0)));
+                    arr->arrayPush(JsValue::object(m));
+                }
+            } catch (...) {}
+        }
+        return JsValue::object(arr);
+    });
     addNative(vm, proto, "padStart", NATIVE("padStart") {
         std::string s = getStr(thisVal); int len = ARG_INT(0);
         std::string pad = args.size()>1?ARG_STR(1):" ";
@@ -1155,22 +1223,38 @@ static void registerRegExp(VM& vm) {
         re->setProp("lastIndex", JsValue::integer(0));
         re->setProp("global",    JsValue::boolean(ARG_STR(1).find('g') != std::string::npos));
         addNative(vm, re, "test", NATIVE("test") {
-            // Very simplified test: just check string containment
             if (!thisVal.isObject()) return JsValue::boolean(false);
             std::string pattern = thisVal.asObject()->getProp("source").toString();
+            std::string flags   = thisVal.asObject()->getProp("flags").toString();
             std::string str = ARG_STR(0);
-            return JsValue::boolean(str.find(pattern) != std::string::npos);
+            try {
+                auto rxFlags = std::regex_constants::ECMAScript;
+                if (flags.find('i') != std::string::npos) rxFlags |= std::regex_constants::icase;
+                std::regex rx(pattern, rxFlags);
+                return JsValue::boolean(std::regex_search(str, rx));
+            } catch (...) {
+                return JsValue::boolean(str.find(pattern) != std::string::npos);
+            }
         });
         addNative(vm, re, "exec", NATIVE("exec") {
-            auto* result = vm.gc().newArray();
             if (!thisVal.isObject()) return JsValue::null();
             std::string pattern = thisVal.asObject()->getProp("source").toString();
+            std::string flags   = thisVal.asObject()->getProp("flags").toString();
             std::string str = ARG_STR(0);
-            auto pos = str.find(pattern);
-            if (pos == std::string::npos) return JsValue::null();
-            result->arrayPush(vm.str(str.substr(pos, pattern.size())));
-            result->setProp("index", JsValue::integer((int32_t)pos));
-            return JsValue::object(result);
+            try {
+                auto rxFlags = std::regex_constants::ECMAScript;
+                if (flags.find('i') != std::string::npos) rxFlags |= std::regex_constants::icase;
+                std::regex rx(pattern, rxFlags);
+                std::smatch m;
+                if (!std::regex_search(str, m, rx)) return JsValue::null();
+                auto* result = vm.gc().newArray();
+                for (size_t i = 0; i < m.size(); ++i) result->arrayPush(vm.str(m[i].str()));
+                result->setProp("index", JsValue::integer((int32_t)m.position(0)));
+                result->setProp("input", vm.str(str));
+                return JsValue::object(result);
+            } catch (...) {
+                return JsValue::null();
+            }
         });
         addNative(vm, re, "toString", NATIVE("re_toString") {
             if (!thisVal.isObject()) return vm.str("/(?:)/");
