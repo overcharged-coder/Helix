@@ -7,6 +7,7 @@
 //
 #include "platform/platform.h"
 #include "platform/form_state.h"
+#include "render/svg.h"
 #include "layout/box.h"
 #include "css/style.h"
 #include "network/url.h"
@@ -134,13 +135,25 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
         }
     }
 
-    // Replaced image
-    if (box.kind == BoxKind::Replaced && !box.replacedUrl.empty() && ps.images) {
-        auto it = ps.images->find(box.replacedUrl);
-        if (it != ps.images->end() && it->second) {
-            float cx = box.contentX();
-            float cy = box.contentY() - ps.scrollY + ps.topInset;
-            ps.r->DrawBitmap(it->second, cx, cy, box.contentW, box.contentH);
+    // Replaced image or inline SVG
+    if (box.kind == BoxKind::Replaced && !box.replacedUrl.empty()) {
+        float cx = box.contentX();
+        float cy = box.contentY() - ps.scrollY + ps.topInset;
+        if (box.replacedUrl == "__svg__" && box.node) {
+            // Render inline SVG to a bitmap on the fly.
+            auto svgBmp = svg::renderSvg(box.node, (int)std::max(box.contentW, box.contentH));
+            if (svgBmp.width > 0 && svgBmp.height > 0) {
+                PlatBitmap bmp = ps.r->CreateBitmap(svgBmp.width, svgBmp.height, svgBmp.pixels.data());
+                if (bmp) {
+                    ps.r->DrawBitmap(bmp, cx, cy, box.contentW, box.contentH);
+                    ps.r->ReleaseBitmap(bmp);
+                }
+            }
+        } else if (ps.images) {
+            auto it = ps.images->find(box.replacedUrl);
+            if (it != ps.images->end() && it->second) {
+                ps.r->DrawBitmap(it->second, cx, cy, box.contentW, box.contentH);
+            }
         }
     }
 

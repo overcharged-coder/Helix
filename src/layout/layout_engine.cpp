@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <sstream>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helix layout engine
@@ -90,7 +91,7 @@ int UaDisplay(const std::string& tag) {
     if (tag == "thead" || tag == "tbody" || tag == "tfoot") return 10;
     if (tag == "img" || tag == "input" || tag == "select" || tag == "textarea"
      || tag == "button" || tag == "object" || tag == "iframe" || tag == "canvas"
-     || tag == "video" || tag == "embed")
+     || tag == "video" || tag == "embed" || tag == "svg")
         return 7;  // replaced/atomic → inline-block-ish
     return 2;       // default inline
 }
@@ -100,7 +101,7 @@ bool IsSkippedTag(const std::string& tag) {
         || tag == "link" || tag == "title" || tag == "noscript" || tag == "base"
         || tag == "template" || tag == "param" || tag == "source" || tag == "track"
         || tag == "col" || tag == "colgroup"
-        || tag == "svg" || tag == "math";
+        || tag == "math";
 }
 
 bool TagIsReplacedImage(const Node* n, const std::string& baseUrl, std::string& urlOut) {
@@ -456,6 +457,26 @@ std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& paren
         if (formControl) {
             box->intrinsicW = (tag == "textarea") ? 180.f : 140.f;
             box->intrinsicH = (tag == "textarea") ? 60.f : 22.f;
+        }
+        if (tag == "svg") {
+            // Parse viewBox or width/height for intrinsic size.
+            auto attrF = [&](const char* a) -> float {
+                std::string v = node->attr(a);
+                if (v.empty()) return 0.f;
+                try { return std::stof(v); } catch (...) { return 0.f; }
+            };
+            float w = attrF("width"), h = attrF("height");
+            std::string vb = node->attr("viewBox");
+            if (vb.empty()) vb = node->attr("viewbox");
+            if ((w <= 0 || h <= 0) && !vb.empty()) {
+                float vx=0,vy=0,vw=0,vh=0;
+                std::istringstream ss(vb); char c;
+                if (ss >> vx >> c >> vy >> c >> vw >> c >> vh) { if (vw>0) w=vw; if (vh>0) h=vh; }
+                else { ss.clear(); ss.str(vb); ss >> vx >> vy >> vw >> vh; if (vw>0) w=vw; if (vh>0) h=vh; }
+            }
+            if (w > 0) box->intrinsicW = w;
+            if (h > 0) box->intrinsicH = h;
+            box->replacedUrl = "__svg__";
         }
         return box;
     }
