@@ -4,6 +4,7 @@
 
 #include "network/fetcher.h"
 #include "network/url.h"
+#include "network/fetcher.h"
 #include "html/parser.h"
 #include "html/resources.h"
 #include "network/text_decode.h"
@@ -767,18 +768,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     stack.pop_back();
                     if (!n) continue;
                     if (n->type == NodeType::Element && n->tagName == "script") {
+                        std::string type = n->attr("type");
+                        // Skip module scripts and non-JS types.
+                        bool skip = (!type.empty() && type != "text/javascript"
+                                     && type != "application/javascript" && type != "module");
                         std::string source;
-                        for (auto& c : n->children)
-                            if (c->type == NodeType::Text) source += c->text;
+                        std::string srcUrl = n->attr("src");
+                        std::string filename = "inline";
+                        if (!srcUrl.empty() && !skip) {
+                            // Fetch external script.
+                            std::string resolved = ResolveUrlAgainstBase(srcUrl, g_tabs[idx].page->url);
+                            auto res = FetchUrl(resolved, 256 * 1024);
+                            if (res.success && !res.body.empty()) {
+                                source = res.body;
+                                filename = resolved;
+                            }
+                        } else {
+                            for (auto& c : n->children)
+                                if (c->type == NodeType::Text) source += c->text;
+                        }
                         totalScriptBytes += source.size();
-                        // Page scripts are opt-in: heavy real-world JS (e.g. Bing's
-                        // search page) running in our incomplete environment tends to
-                        // rewrite/blank the DOM. Rendering the static HTML is far more
-                        // useful. Set HELIX_JS=1 to re-enable script execution.
-                        static bool jsEnabled = (getenv("HELIX_JS") != nullptr);
-                        if (jsEnabled && !source.empty() && scriptCount < 128 && totalScriptBytes <= 256 * 1024) {
-                            const std::string filename = n->attr("__helix_script_filename");
-                            g_js.runScript(source, filename.empty() ? "inline" : filename);
+                        if (!skip && !source.empty() && scriptCount < 128 && totalScriptBytes <= 512 * 1024) {
+                            g_js.runScript(source, filename);
                         }
                         ++scriptCount;
                     }

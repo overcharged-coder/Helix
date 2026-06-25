@@ -36,11 +36,11 @@ void JsEngine::setDocument(std::shared_ptr<Node> doc, std::function<void()> onRe
 }
 
 bool JsEngine::runScript(const std::string& source, const std::string& filename) {
-    // Skip very large scripts — our recursive parser will stack-overflow on
-    // minified 100KB+ bundles from sites like Amazon.
-    constexpr size_t kMaxScriptBytes = 32 * 1024; // 32 KB
+    // Skip very large scripts — our recursive parser may stack-overflow on
+    // huge minified bundles. 256KB covers most real site scripts.
+    constexpr size_t kMaxScriptBytes = 256 * 1024;
     if (source.size() > kMaxScriptBytes) {
-        fprintf(stderr, "%s",("[JS] Skipping large script in " + filename + "\n").c_str());
+        fprintf(stderr, "%s",("[JS] Skipping large script (" + std::to_string(source.size()/1024) + "KB) in " + filename + "\n").c_str());
         return false;
     }
     try {
