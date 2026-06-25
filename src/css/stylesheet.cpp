@@ -1016,6 +1016,55 @@ static void ApplyDeclaration(const std::string& prop,
         std::string v = sLower(sTrim(val));
         out.boxSizing = (v == "border-box") ? 1 : 0;
         out.boxSizingSet = true;
+    } else if (prop == "transform") {
+        std::string v = sLower(val);
+        if (v.find("none") != std::string::npos) {
+            out.transformSet = true;
+        } else {
+            out.transformSet = true;
+            // Parse transform functions: translate(x,y), translateX(x), translateY(y),
+            // scale(s), rotate(deg)
+            size_t pos = 0;
+            while (pos < v.size()) {
+                size_t paren = v.find('(', pos);
+                if (paren == std::string::npos) break;
+                std::string fn = sTrim(v.substr(pos, paren - pos));
+                size_t end = v.find(')', paren);
+                if (end == std::string::npos) break;
+                std::string argStr = v.substr(paren + 1, end - paren - 1);
+                // Split args by comma.
+                std::vector<float> fargs;
+                std::istringstream as(argStr);
+                std::string tok;
+                while (std::getline(as, tok, ',')) {
+                    float f = ParseLength(sTrim(tok));
+                    if (f <= -1e5f) {
+                        // Try deg
+                        std::string t = sTrim(tok);
+                        size_t deg = t.find("deg");
+                        if (deg != std::string::npos) {
+                            try { f = std::stof(t.substr(0, deg)); } catch (...) { f = 0; }
+                        } else {
+                            try { f = std::stof(t); } catch (...) { f = 0; }
+                        }
+                    }
+                    fargs.push_back(f);
+                }
+                if (fn == "translate" && fargs.size() >= 1) {
+                    out.transformTx = fargs[0];
+                    if (fargs.size() >= 2) out.transformTy = fargs[1];
+                } else if (fn == "translatex") {
+                    if (!fargs.empty()) out.transformTx = fargs[0];
+                } else if (fn == "translatey") {
+                    if (!fargs.empty()) out.transformTy = fargs[0];
+                } else if (fn == "scale" && !fargs.empty()) {
+                    out.transformScale = fargs[0];
+                } else if (fn == "rotate" && !fargs.empty()) {
+                    out.transformRotate = fargs[0];
+                }
+                pos = end + 1;
+            }
+        }
     } else if (prop == "object-fit") {
         std::string v = sLower(sTrim(val));
         out.objectFit = (v == "contain") ? 1 : (v == "cover") ? 2
@@ -1106,8 +1155,12 @@ static void ApplyDeclaration(const std::string& prop,
             } catch (...) {}
         }
     } else if (prop == "overflow" || prop == "overflow-x" || prop == "overflow-y") {
-        out.overflowHidden = (sLower(sTrim(val)) == "hidden");
+        std::string v = sLower(sTrim(val));
         out.overflowSet = true;
+        if (v == "hidden")      { out.overflowHidden = true;  out.overflowMode = 1; }
+        else if (v == "auto")   { out.overflowHidden = true;  out.overflowMode = 2; }
+        else if (v == "scroll") { out.overflowHidden = true;  out.overflowMode = 3; }
+        else                    { out.overflowHidden = false; out.overflowMode = 0; }
     } else if (prop == "top") {
         std::string v = sLower(sTrim(val));
         if (v != "auto" && v != "inherit" && v != "initial" && v != "unset")

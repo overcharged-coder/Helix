@@ -104,8 +104,10 @@ struct ComputedStyle {
     int      positionMode = 0;       // 0=static, 1=relative, 2=absolute, 3=fixed
     int      zIndex       = 0;
     bool     zIndexSet    = false;
-    bool     overflowHidden = false;
+    bool     overflowHidden = false;   // legacy: true if hidden/auto/scroll
     bool     overflowSet    = false;
+    // 0=visible, 1=hidden, 2=auto, 3=scroll
+    int      overflowMode   = 0;
     float    top          = 0;
     float    right        = 0;
     float    bottom       = 0;
@@ -126,6 +128,12 @@ struct ComputedStyle {
     // box-sizing: 0=content-box (default), 1=border-box
     int      boxSizing        = 0;
     bool     boxSizingSet     = false;
+    // CSS transform (simplified: one translate + one scale + one rotate).
+    float    transformTx      = 0;   // translateX (px)
+    float    transformTy      = 0;   // translateY (px)
+    float    transformScale   = 1;   // scale factor
+    float    transformRotate  = 0;   // rotation (degrees)
+    bool     transformSet     = false;
     bool     visibilitySet    = false;
     // List style
     bool     listStyleNone    = false;
@@ -257,7 +265,7 @@ struct ComputedStyle {
         if (child.clearMode    != 0) out.clearMode = child.clearMode;
         if (child.positionMode != 0) out.positionMode = child.positionMode;
         if (child.zIndexSet) { out.zIndex = child.zIndex; out.zIndexSet = true; }
-        if (child.overflowSet)  { out.overflowHidden = child.overflowHidden; out.overflowSet = true; }
+        if (child.overflowSet)  { out.overflowHidden = child.overflowHidden; out.overflowSet = true; out.overflowMode = child.overflowMode; }
         if (child.topSet)    { out.top    = child.top;    out.topSet    = true; }
         if (child.rightSet)  { out.right  = child.right;  out.rightSet  = true; }
         if (child.bottomSet) { out.bottom = child.bottom; out.bottomSet = true; }
@@ -268,6 +276,11 @@ struct ComputedStyle {
         if (child.widthKeyword != 0) out.widthKeyword = child.widthKeyword;
         if (child.heightKeyword != 0) out.heightKeyword = child.heightKeyword;
         if (child.boxSizingSet) { out.boxSizing = child.boxSizing; out.boxSizingSet = true; }
+        if (child.transformSet) {
+            out.transformTx = child.transformTx; out.transformTy = child.transformTy;
+            out.transformScale = child.transformScale; out.transformRotate = child.transformRotate;
+            out.transformSet = true;
+        }
         if (child.listStyleSet) { out.listStyleNone = child.listStyleNone; out.listStyleSet = true; }
         if (child.borderSpacing >= 0) out.borderSpacing = child.borderSpacing;
         if (child.flexDirectionSet) {

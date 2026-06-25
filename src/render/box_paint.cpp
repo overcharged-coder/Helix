@@ -363,16 +363,32 @@ void Renderer::PaintBox(const LayoutBox& box, float scrollY, float topInset, boo
     bool hidden = (box.style.visibilitySet && box.style.visibilityHidden)
                 || (box.style.opacitySet && box.style.opacity < 0.01f);
 
+    // CSS transform: apply a D2D matrix around this box's center.
+    D2D1_MATRIX_3X2_F oldTransform;
+    bool hasTransform = box.style.transformSet && m_rt &&
+        (box.style.transformTx != 0 || box.style.transformTy != 0
+         || box.style.transformScale != 1 || box.style.transformRotate != 0);
+    if (hasTransform) {
+        m_rt->GetTransform(&oldTransform);
+        float cx = box.x + box.borderBoxW() / 2;
+        float cy = box.y - effScroll + topInset + box.borderBoxH() / 2;
+        auto mat = D2D1::Matrix3x2F::Translation(-cx, -cy)
+                 * D2D1::Matrix3x2F::Scale(box.style.transformScale, box.style.transformScale)
+                 * D2D1::Matrix3x2F::Rotation(box.style.transformRotate)
+                 * D2D1::Matrix3x2F::Translation(cx + box.style.transformTx,
+                                                  cy + box.style.transformTy);
+        m_rt->SetTransform(mat * oldTransform);
+    }
+
     // 1. This box's own background / borders / replaced content / marker.
     if (!hidden && box.kind != BoxKind::Text && box.kind != BoxKind::Inline
         && box.kind != BoxKind::Break)
         PaintBoxDecorations(box, effScroll, topInset);
 
-    // overflow:hidden clips all children to the border box. Also clip any
-    // block with an explicit CSS height — even without overflow:hidden, content
-    // that spills past an explicit height looks like garbage (Bing's related
-    // searches section uses giant font inside a fixed-height container).
+    // overflow:hidden/auto/scroll clips all children to the border box.
     bool clipped = false;
+    float scrollYBefore = scrollY;
+    extern std::map<const Node*, float> g_elementScrollY;
     if (!hidden && m_rt) {
         bool shouldClip = box.style.overflowHidden;
         if (shouldClip) {
@@ -385,6 +401,12 @@ void Renderer::PaintBox(const LayoutBox& box, float scrollY, float topInset, boo
                     D2D1::RectF(cx, cy, cx + cw, cy + ch),
                     D2D1_ANTIALIAS_MODE_ALIASED);
                 clipped = true;
+                // Apply per-element scroll for overflow:auto/scroll.
+                if (box.style.overflowMode >= 2 && box.node) {
+                    auto it = g_elementScrollY.find(box.node);
+                    if (it != g_elementScrollY.end())
+                        scrollY += it->second;
+                }
             }
         }
     }
@@ -425,5 +447,9 @@ void Renderer::PaintBox(const LayoutBox& box, float scrollY, float topInset, boo
     for (auto* k : floats) PaintBox(*k, scrollY, topInset, fixed);
     for (auto* k : posZ)   PaintBox(*k, scrollY, topInset, fixed);
 
-    if (clipped) m_rt->PopAxisAlignedClip();
+    if (clipped) {
+        m_rt->PopAxisAlignedClip();
+        scrollY = scrollYBefore;
+    }
+    if (hasTransform) m_rt->SetTransform(oldTransform);
 }

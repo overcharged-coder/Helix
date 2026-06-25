@@ -11,6 +11,7 @@
 #include "render/renderer.h"
 #include "platform/form_state.h"
 #include "platform/updater.h"
+#include "platform/box_painter.h"
 #include "js/engine.h"
 
 #include <string>
@@ -94,6 +95,8 @@ static bool     g_findVisible = false;
 static Renderer g_renderer;
 static FormState g_formState;
 static Updater g_updater;
+std::map<const Node*, float> g_elementScrollY;
+static std::vector<ScrollableRegion> g_scrollables;
 static JsEngine g_js;
 
 static std::vector<Tab> g_tabs;
@@ -818,9 +821,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_MOUSEWHEEL: {
-        CurTab().scrollY -= GET_WHEEL_DELTA_WPARAM(wp) * 0.5f;
-        ClampScroll();
-        UpdateScrollbar();
+        POINT pt = { (int)(short)LOWORD(lp), (int)(short)HIWORD(lp) };
+        ScreenToClient(hwnd, &pt);
+        float delta = GET_WHEEL_DELTA_WPARAM(wp) * 0.5f;
+        // Check if cursor is inside a scrollable container.
+        bool scrolledElement = false;
+        for (auto& sr : g_scrollables) {
+            if (pt.x >= sr.x && pt.x <= sr.x + sr.w && pt.y >= sr.y && pt.y <= sr.y + sr.h) {
+                float maxScroll = std::max(0.f, sr.contentH - sr.h);
+                float& elScroll = g_elementScrollY[sr.node];
+                elScroll = std::max(0.f, std::min(elScroll - delta, maxScroll));
+                scrolledElement = true;
+                break;
+            }
+        }
+        if (!scrolledElement) {
+            CurTab().scrollY -= delta;
+            ClampScroll();
+            UpdateScrollbar();
+        }
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }

@@ -17,6 +17,14 @@
 #include <functional>
 #include <algorithm>
 
+// Per-element scroll offsets for overflow:auto/scroll containers.
+struct ScrollableRegion {
+    const Node* node = nullptr;
+    float x, y, w, h;          // screen coords of the scroll container
+    float contentH;             // total content height
+    float scrollY = 0;          // current scroll offset within the container
+};
+
 struct PaintState {
     IPlatformRenderer* r = nullptr;
     float scrollY = 0;
@@ -26,6 +34,8 @@ struct PaintState {
     std::vector<HitRegion>* hits = nullptr;
     std::map<std::string, PlatFont>* fontCache = nullptr;
     FormState* form = nullptr;
+    std::vector<ScrollableRegion>* scrollables = nullptr;
+    std::map<const Node*, float>* elementScrollY = nullptr;
 };
 
 inline PlatColor ToPlatColor(const CssColor& c) { return { c.r, c.g, c.b, c.a }; }
@@ -259,17 +269,47 @@ inline void PaintBoxTree(PaintState& ps, const LayoutBox& box) {
     bool hidden = (box.style.visibilitySet && box.style.visibilityHidden)
                || (box.style.opacitySet && box.style.opacity < 0.01f);
 
+    // CSS transform: for the cross-platform painter we apply translate by
+    // temporarily shifting scrollY/topInset (which offsets all paint coords).
+    // Scale and rotate would need native matrix support per-renderer.
+    float savedScrollY = ps.scrollY;
+    float savedTopInset = ps.topInset;
+    if (box.style.transformSet) {
+        ps.topInset += box.style.transformTy;
+        // Horizontal translate: shift all x coords by adjusting the box's
+        // paint origin. We cast away const to apply the offset temporarily.
+        const_cast<LayoutBox&>(box).x += box.style.transformTx;
+    }
+
     // Decorations
     if (!hidden && box.kind != BoxKind::Text && box.kind != BoxKind::Inline && box.kind != BoxKind::Break)
         PaintBoxDecorations(ps, box);
 
-    // overflow:hidden clip
+    // overflow:hidden/auto/scroll clip + scroll offset
     bool clipped = false;
+    float savedScrollForOverflow = ps.scrollY;
     if (box.style.overflowHidden && !hidden) {
         float effScroll = box.style.positionMode == 3 ? 0.f : ps.scrollY;
         float cx = box.x, cy = box.y - effScroll + ps.topInset;
         float cw = box.borderBoxW(), ch = box.borderBoxH();
-        if (cw > 0 && ch > 0) { ps.r->PushClip(cx, cy, cw, ch); clipped = true; }
+        if (cw > 0 && ch > 0) {
+            ps.r->PushClip(cx, cy, cw, ch);
+            clipped = true;
+            // For auto/scroll, apply the element's own scroll offset.
+            if (box.style.overflowMode >= 2 && box.node && ps.elementScrollY) {
+                auto it = ps.elementScrollY->find(box.node);
+                float elScroll = (it != ps.elementScrollY->end()) ? it->second : 0.f;
+                ps.scrollY += elScroll;
+                // Register as a scrollable region so the shell can route wheel events.
+                if (ps.scrollables) {
+                    ps.scrollables->push_back({
+                        box.node, cx, cy, cw, ch,
+                        box.contentH + box.padTop + box.padBottom,
+                        elScroll
+                    });
+                }
+            }
+        }
     }
 
     // Children (simplified stacking: in-flow, then floats, then positioned)
@@ -287,5 +327,15 @@ inline void PaintBoxTree(PaintState& ps, const LayoutBox& box) {
         if (k->isOutOfFlow() || k->style.positionMode == 1) PaintBoxTree(ps, *k);
     }
 
-    if (clipped) ps.r->PopClip();
+    if (clipped) {
+        ps.r->PopClip();
+        ps.scrollY = savedScrollForOverflow;
+    }
+
+    // Restore transform offsets.
+    if (box.style.transformSet) {
+        const_cast<LayoutBox&>(box).x -= box.style.transformTx;
+        ps.scrollY = savedScrollY;
+        ps.topInset = savedTopInset;
+    }
 }
