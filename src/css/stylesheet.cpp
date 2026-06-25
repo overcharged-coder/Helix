@@ -1196,6 +1196,71 @@ ComputedStyle ParseInlineStyle(const std::string& style) {
 static const Node* PreviousElementSibling(const Node* node);
 static const Node* NextElementSibling(const Node* node);
 
+static int ElementChildIndex(const Node* node) {
+    if (!node || !node->parent) return 0;
+    int idx = 0;
+    for (const auto& c : node->parent->children) {
+        if (c->type == NodeType::Element) ++idx;
+        if (c.get() == node) return idx;
+    }
+    return 0;
+}
+
+static int ElementChildCount(const Node* node) {
+    if (!node || !node->parent) return 0;
+    int count = 0;
+    for (const auto& c : node->parent->children)
+        if (c->type == NodeType::Element) ++count;
+    return count;
+}
+
+static bool IsFirstOfType(const Node* node) {
+    if (!node || !node->parent) return false;
+    for (const auto& c : node->parent->children) {
+        if (c->type == NodeType::Element && c->tagName == node->tagName)
+            return c.get() == node;
+    }
+    return false;
+}
+
+static bool IsLastOfType(const Node* node) {
+    if (!node || !node->parent) return false;
+    const Node* last = nullptr;
+    for (const auto& c : node->parent->children)
+        if (c->type == NodeType::Element && c->tagName == node->tagName) last = c.get();
+    return last == node;
+}
+
+// Match An+B expression against a 1-based index.
+static bool MatchesNth(int index, int a, int b) {
+    if (a == 0) return index == b;
+    int diff = index - b;
+    if (a > 0) return diff >= 0 && diff % a == 0;
+    return diff <= 0 && (-diff) % (-a) == 0;
+}
+
+// Parse "odd", "even", "3", "2n+1", "-n+3", etc. Returns (a,b).
+static std::pair<int,int> ParseNthExpr(const std::string& expr) {
+    std::string s; for (char c : expr) if (!std::isspace((unsigned char)c)) s += c;
+    if (s == "odd") return {2, 1};
+    if (s == "even") return {2, 0};
+    size_t npos = s.find('n');
+    if (npos == std::string::npos) {
+        try { return {0, std::stoi(s)}; } catch (...) { return {0, 0}; }
+    }
+    int a = 1;
+    if (npos > 0) {
+        std::string as = s.substr(0, npos);
+        if (as == "-") a = -1; else if (as == "+") a = 1;
+        else { try { a = std::stoi(as); } catch (...) {} }
+    }
+    int b = 0;
+    if (npos + 1 < s.size()) {
+        try { b = std::stoi(s.substr(npos + 1)); } catch (...) {}
+    }
+    return {a, b};
+}
+
 static bool MatchesPseudoClass(const std::string& pseudo, const Node* node) {
     if (pseudo == "first-child") return PreviousElementSibling(node) == nullptr;
     if (pseudo == "last-child") return NextElementSibling(node) == nullptr;
@@ -1206,6 +1271,24 @@ static bool MatchesPseudoClass(const std::string& pseudo, const Node* node) {
                               && node->attrs.find("href") != node->attrs.end();
     if (pseudo == "root") return node && node->parent
                               && node->parent->type == NodeType::Document;
+    if (pseudo == "first-of-type") return IsFirstOfType(node);
+    if (pseudo == "last-of-type") return IsLastOfType(node);
+    // :nth-child(An+B) — the argument is stored in the pseudo string itself.
+    if (pseudo.rfind("nth-child(", 0) == 0) {
+        std::string arg = pseudo.substr(10, pseudo.size() - 11);
+        auto [a, b] = ParseNthExpr(arg);
+        return MatchesNth(ElementChildIndex(node), a, b);
+    }
+    if (pseudo.rfind("nth-last-child(", 0) == 0) {
+        std::string arg = pseudo.substr(15, pseudo.size() - 16);
+        auto [a, b] = ParseNthExpr(arg);
+        int fromEnd = ElementChildCount(node) - ElementChildIndex(node) + 1;
+        return MatchesNth(fromEnd, a, b);
+    }
+    // :hover/:focus/:active — always false (no input state tracking yet).
+    if (pseudo == "hover" || pseudo == "focus" || pseudo == "active"
+        || pseudo == "visited" || pseudo == "checked" || pseudo == "disabled"
+        || pseudo == "enabled") return false;
     return false;
 }
 
@@ -1275,6 +1358,24 @@ static bool MatchesSimpleSelector(const CssSelectorPart& part, const Node* node)
     for (const auto& pseudo : part.pseudos) {
         if (!MatchesPseudoClass(pseudo, node)) return false;
     }
+    // :not() — the node must NOT match the simple selector argument.
+    for (const auto& notArg : part.notSelectors) {
+        if (notArg.empty()) continue;
+        if (notArg[0] == '.') {
+            std::string cls = notArg.substr(1);
+            std::string ca = node->attr("class");
+            std::istringstream ss(ca); std::string tok;
+            while (ss >> tok) if (tok == cls) return false;
+        } else if (notArg[0] == '#') {
+            if (node->attr("id") == notArg.substr(1)) return false;
+        } else if (notArg[0] == '[') {
+            // Simplified :not([attr]) — just check attribute existence.
+            std::string attr = notArg.substr(1, notArg.size() - 2);
+            if (!node->attr(attr).empty()) return false;
+        } else {
+            if (node->tagName == notArg) return false;
+        }
+    }
     return true;
 }
 
@@ -1335,6 +1436,18 @@ bool CssRule::matches(const Node* node) const {
             } else if (combinator == '+') {
                 current = PreviousElementSibling(current);
                 if (!MatchesSimpleSelector(wanted, current)) return false;
+            } else if (combinator == '~') {
+                // General sibling: any preceding sibling element that matches.
+                bool found = false;
+                if (current && current->parent) {
+                    for (const auto& c : current->parent->children) {
+                        if (c.get() == current) break;
+                        if (c->type == NodeType::Element && MatchesSimpleSelector(wanted, c.get())) {
+                            current = c.get(); found = true;
+                        }
+                    }
+                }
+                if (!found) return false;
             } else {
                 const Node* ancestor = current->parent;
                 bool found = false;
@@ -1493,14 +1606,32 @@ static CssSelectorPart parseSimpleSelectorPart(const std::string& sel) {
                     }
                     ++j;
                 }
-                part.neverMatch = true;
+                // Functional pseudo-classes: :nth-child(...), :not(...), etc.
+                // Extract the argument text (between the parens).
+                size_t argStart = sel.find('(', nameStart) + 1;
+                std::string argText = sTrim(sel.substr(argStart, j - 1 - argStart));
+                if (pseudo == "nth-child" || pseudo == "nth-last-child") {
+                    // Store as "nth-child(2n+1)" so MatchesPseudoClass can parse it.
+                    part.pseudos.push_back(pseudo + "(" + sLower(argText) + ")");
+                } else if (pseudo == "not") {
+                    // :not(selector) — parse the argument as a simple selector and
+                    // store it as a negation pseudo. We support simple cases:
+                    // :not(.class), :not(tag), :not(#id), :not([attr]).
+                    part.notSelectors.push_back(sLower(argText));
+                } else {
+                    part.neverMatch = true;
+                }
                 i = j - 1;
             } else {
                 if (pseudo == "before" || pseudo == "after") {
                     part.pseudoElement = pseudo;
                 } else if (!isDoubleColon && (pseudo == "first-child" || pseudo == "last-child"
                     || pseudo == "only-child" || pseudo == "empty"
-                    || pseudo == "link" || pseudo == "root")) {
+                    || pseudo == "link" || pseudo == "root"
+                    || pseudo == "first-of-type" || pseudo == "last-of-type"
+                    || pseudo == "hover" || pseudo == "focus" || pseudo == "active"
+                    || pseudo == "visited" || pseudo == "checked"
+                    || pseudo == "disabled" || pseudo == "enabled")) {
                     part.pseudos.push_back(pseudo);
                 } else {
                     part.neverMatch = true;
@@ -1564,7 +1695,7 @@ static std::vector<CssSelectorPart> parseSelectorChain(std::string selector) {
             tok += c;
             continue;
         }
-        if (bracketDepth == 0 && (c == '>' || c == '+')) {
+        if (bracketDepth == 0 && (c == '>' || c == '+' || c == '~')) {
             flushToken();
             nextCombinator = c;
             continue;

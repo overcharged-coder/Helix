@@ -23,9 +23,10 @@ struct CssSelectorPart {
     bool attrHasValue = false;
     CssAttrMatch attrMatch = CssAttrMatch::Exists;
     std::vector<std::string> pseudos;
+    std::vector<std::string> notSelectors;  // :not() argument text (simple selectors)
     std::string pseudoElement;  // "before" or "after" for generated content
     bool neverMatch = false;
-    char combinator = 0;   // 0 = first part, ' ' = descendant, '>' = child, '+' = adjacent sibling
+    char combinator = 0;   // 0=first, ' '=descendant, '>'=child, '+'=adjacent, '~'=general sibling
 };
 
 // One branch of an @media query list. A rule without media conditions is
