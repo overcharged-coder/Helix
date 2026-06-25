@@ -1,5 +1,6 @@
 #include "js/dom_bridge.h"
 #include "html/parser.h"
+#include "network/fetcher.h"
 #include <algorithm>
 #include <sstream>
 #include <chrono>
@@ -618,7 +619,8 @@ static void setInnerHtml(Node* parent, const std::string& html) {
 }
 
 void registerDom(VM& vm, std::shared_ptr<Node> docNode,
-                 std::function<void()> onRepaint) {
+                 std::function<void()> onRepaint,
+                 const std::string& pageUrl) {
     vm.onDomDirty = onRepaint;
 
     // Reflect live JS property writes onto the backing DOM node.
@@ -693,18 +695,42 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         docVal.asObject()->setProp("characterSet",    vm.str("UTF-8"));
     }
 
-    // window globals
+    // window globals — populate location from the page URL.
     auto* winLocation = vm.gc().newObject(ObjKind::Plain);
-    winLocation->setProp("href",     vm.str(""));
-    winLocation->setProp("protocol", vm.str(""));
-    winLocation->setProp("host",     vm.str(""));
-    winLocation->setProp("pathname", vm.str("/"));
-    winLocation->setProp("search",   vm.str(""));
-    winLocation->setProp("hash",     vm.str(""));
-    winLocation->setProp("origin",   vm.str(""));
-    vm.gc().newNativeFunction([](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
-        return JsValue::undefined();
-    }, "assign");
+    {
+        std::string href = pageUrl, protocol, host, pathname = "/", search, hash, origin;
+        size_t scheme = href.find("://");
+        if (scheme != std::string::npos) {
+            protocol = href.substr(0, scheme + 1); // "https:"
+            size_t hostStart = scheme + 3;
+            size_t pathStart = href.find('/', hostStart);
+            host = (pathStart != std::string::npos) ? href.substr(hostStart, pathStart - hostStart) : href.substr(hostStart);
+            origin = href.substr(0, scheme + 3) + host;
+            if (pathStart != std::string::npos) {
+                size_t qmark = href.find('?', pathStart);
+                size_t hashMark = href.find('#', pathStart);
+                size_t pathEnd = std::min(qmark, hashMark);
+                pathname = href.substr(pathStart, pathEnd != std::string::npos ? pathEnd - pathStart : std::string::npos);
+                if (qmark != std::string::npos) {
+                    size_t searchEnd = (hashMark != std::string::npos && hashMark > qmark) ? hashMark : std::string::npos;
+                    search = href.substr(qmark, searchEnd != std::string::npos ? searchEnd - qmark : std::string::npos);
+                }
+                if (hashMark != std::string::npos) hash = href.substr(hashMark);
+            }
+        }
+        winLocation->setProp("href",     vm.str(href));
+        winLocation->setProp("protocol", vm.str(protocol));
+        winLocation->setProp("host",     vm.str(host));
+        winLocation->setProp("hostname", vm.str(host));
+        winLocation->setProp("pathname", vm.str(pathname));
+        winLocation->setProp("search",   vm.str(search));
+        winLocation->setProp("hash",     vm.str(hash));
+        winLocation->setProp("origin",   vm.str(origin));
+        winLocation->setProp("port",     vm.str(""));
+    }
+    addNative(vm, winLocation, "assign",  NATIVE("loc_assign")  { return JsValue::undefined(); });
+    addNative(vm, winLocation, "replace", NATIVE("loc_replace") { return JsValue::undefined(); });
+    addNative(vm, winLocation, "reload",  NATIVE("loc_reload")  { return JsValue::undefined(); });
     vm.setGlobal("location", JsValue::object(winLocation));
 
     auto* winHistory = vm.gc().newObject(ObjKind::Plain);
@@ -738,6 +764,87 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     vm.setGlobal("scrollX",     JsValue::integer(0));
     vm.setGlobal("scrollY",     JsValue::integer(0));
     vm.setGlobal("devicePixelRatio", JsValue::number(1.0));
+
+    // getComputedStyle(element) — returns a stub object with getPropertyValue().
+    vm.setGlobal("getComputedStyle", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("getComputedStyle") {
+            auto* style = vm.gc().newObject(ObjKind::Plain);
+            addNative(vm, style, "getPropertyValue", NATIVE("getPropertyValue") {
+                return vm.str("");
+            });
+            // Common style properties — return empty string (sites just check for existence).
+            const char* common[] = { "display","position","visibility","overflow",
+                "width","height","margin","padding","color","backgroundColor",
+                "fontSize","fontFamily","fontWeight","opacity","zIndex",
+                "top","left","right","bottom","transform","transition" };
+            for (auto* p : common) style->setProp(p, vm.str(""));
+            return JsValue::object(style);
+        }, "getComputedStyle")));
+
+    // matchMedia(query) — returns { matches: false, media: query }.
+    vm.setGlobal("matchMedia", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("matchMedia") {
+            std::string query = ARG_STR(0);
+            auto* mql = vm.gc().newObject(ObjKind::Plain);
+            // Simple checks for common queries.
+            bool matches = false;
+            if (query.find("(prefers-color-scheme: light)") != std::string::npos) matches = true;
+            mql->setProp("matches", JsValue::boolean(matches));
+            mql->setProp("media", vm.str(query));
+            addNative(vm, mql, "addEventListener", NATIVE("mql_ael") { return JsValue::undefined(); });
+            addNative(vm, mql, "removeEventListener", NATIVE("mql_rel") { return JsValue::undefined(); });
+            addNative(vm, mql, "addListener", NATIVE("mql_al") { return JsValue::undefined(); });
+            return JsValue::object(mql);
+        }, "matchMedia")));
+
+    // fetch(url) — makes an HTTP request and returns a Promise-like object.
+    vm.setGlobal("fetch", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("fetch") {
+            std::string url = ARG_STR(0);
+            // Synchronous fetch (simplified — real fetch is async, but our VM
+            // doesn't have a true event loop yet).
+            auto res = FetchUrl(url);
+            auto* response = vm.gc().newObject(ObjKind::Plain);
+            response->setProp("ok", JsValue::boolean(res.success));
+            response->setProp("status", JsValue::integer(res.success ? 200 : 0));
+            response->setProp("url", vm.str(url));
+            std::string body = res.success ? res.body : "";
+            // .text() returns a resolved Promise with the body string.
+            auto bodyStr = vm.str(body);
+            addNative(vm, response, "text", [bodyStr](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+                auto* p = v.gc().newObject(ObjKind::Plain);
+                JsValue resolved = bodyStr;
+                addNative(v, p, "then", [resolved](VM& v2, JsValue, std::vector<JsValue> a2) -> JsValue {
+                    if (!a2.empty() && a2[0].isCallable())
+                        return v2.call(a2[0], JsValue::undefined(), { resolved });
+                    return JsValue::undefined();
+                });
+                addNative(v, p, "catch", [](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+                    return JsValue::undefined();
+                });
+                return JsValue::object(p);
+            });
+            // .json() parses the body as JSON.
+            addNative(vm, response, "json", [body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+                JsValue jsonVal = v.getGlobal("JSON");
+                if (jsonVal.isObject()) {
+                    JsValue parseFn = jsonVal.asObject()->getProp("parse");
+                    if (parseFn.isCallable())
+                        return v.call(parseFn, jsonVal, { v.str(body) });
+                }
+                return JsValue::undefined();
+            });
+            // Wrap in a thenable.
+            auto* promise = vm.gc().newObject(ObjKind::Plain);
+            JsValue respVal = JsValue::object(response);
+            addNative(vm, promise, "then", [respVal](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                if (!a.empty() && a[0].isCallable())
+                    return v.call(a[0], JsValue::undefined(), { respVal });
+                return JsValue::undefined();
+            });
+            addNative(vm, promise, "catch", NATIVE("fetch_catch") { return JsValue::undefined(); });
+            return JsValue::object(promise);
+        }, "fetch")));
 
     // window.addEventListener / removeEventListener (no-ops for now)
     vm.setGlobal("addEventListener", JsValue::object(vm.gc().newNativeFunction(

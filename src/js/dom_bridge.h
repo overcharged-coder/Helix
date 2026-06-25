@@ -8,8 +8,10 @@
 JsValue wrapNode(VM& vm, std::shared_ptr<Node> node);
 
 // Bootstrap the document object and window globals.
+// pageUrl is the current page's URL (populates window.location).
 void registerDom(VM& vm, std::shared_ptr<Node> document,
-                 std::function<void()> onRepaint);
+                 std::function<void()> onRepaint,
+                 const std::string& pageUrl = "");
 
 // Retrieve the Node* from a DOM wrapper JsObject (nullptr if not a DOM object).
 Node* unwrapNode(JsValue val);
