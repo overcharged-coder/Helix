@@ -9,6 +9,7 @@
 #include "network/text_decode.h"
 #include "layout/scroll.h"
 #include "render/renderer.h"
+#include "platform/form_state.h"
 #include "js/engine.h"
 
 #include <string>
@@ -90,6 +91,7 @@ static HWND     g_hwndStatus;
 static HWND     g_hwndFind;
 static bool     g_findVisible = false;
 static Renderer g_renderer;
+static FormState g_formState;
 static JsEngine g_js;
 
 static std::vector<Tab> g_tabs;
@@ -842,6 +844,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int px = (int)(short)LOWORD(lp);
         int py = (int)(short)HIWORD(lp);
         if (py >= TOP_INSET) {
+            // Check if an input was clicked.
+            if (g_renderer.GetLayoutRoot()) {
+                Node* input = FormState::hitTestInput(*g_renderer.GetLayoutRoot(),
+                    (float)px, (float)py, CurTab().scrollY, (float)TOP_INSET);
+                if (input) {
+                    g_formState.focus(input);
+                    InvalidateRect(g_hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                g_formState.blur();
+            }
             std::string href = g_renderer.HitTest((float)px, (float)py);
             if (!href.empty()) Navigate(href);
         }
@@ -894,6 +907,52 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PostQuitMessage(0);
         return 0;
     }
+
+    // Form input keyboard handling: route chars to focused input.
+    if (g_formState.focusedInput) {
+        if (msg == WM_CHAR) {
+            if (wp == '\r') {
+                // Enter in a form input: submit the form via GET.
+                std::string url = g_formState.buildFormQuery();
+                if (!url.empty()) {
+                    g_formState.blur();
+                    Navigate(url);
+                }
+            } else if (wp == '\b') {
+                g_formState.backspace();
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+            } else if (wp >= 32) {
+                g_formState.insertChar((char)wp);
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        if (msg == WM_KEYDOWN) {
+            if (wp == VK_LEFT && g_formState.cursorPos > 0) {
+                g_formState.cursorPos--;
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (wp == VK_RIGHT) {
+                std::string v = g_formState.getValue(g_formState.focusedInput);
+                if (g_formState.cursorPos < v.size()) g_formState.cursorPos++;
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (wp == VK_DELETE) {
+                g_formState.deleteChar();
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (wp == VK_HOME) { g_formState.cursorPos = 0; InvalidateRect(g_hwnd, nullptr, FALSE); return 0; }
+            if (wp == VK_END) {
+                g_formState.cursorPos = g_formState.getValue(g_formState.focusedInput).size();
+                InvalidateRect(g_hwnd, nullptr, FALSE); return 0;
+            }
+            if (wp == VK_ESCAPE) { g_formState.blur(); InvalidateRect(g_hwnd, nullptr, FALSE); return 0; }
+        }
+    }
+
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 

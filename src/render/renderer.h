@@ -57,6 +57,7 @@ public:
 
     void  SetZoom(float z);
     float GetZoom() const { return m_zoom; }
+    const LayoutBox* GetLayoutRoot() const { return m_layoutRoot.get(); }
 
     void SetSearchQuery(const std::wstring& q) { m_searchQuery = q; }
     const std::wstring& GetSearchQuery() const { return m_searchQuery; }

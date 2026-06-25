@@ -6,6 +6,7 @@
 // calls. Used by all platform shells.
 //
 #include "platform/platform.h"
+#include "platform/form_state.h"
 #include "layout/box.h"
 #include "css/style.h"
 #include "network/url.h"
@@ -24,6 +25,7 @@ struct PaintState {
     std::map<std::string, PlatBitmap>* images = nullptr;
     std::vector<HitRegion>* hits = nullptr;
     std::map<std::string, PlatFont>* fontCache = nullptr;
+    FormState* form = nullptr;
 };
 
 inline PlatColor ToPlatColor(const CssColor& c) { return { c.r, c.g, c.b, c.a }; }
@@ -157,6 +159,51 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
         float markerY = box.contentY() - ps.scrollY + ps.topInset;
         PlatColor tc = s.color.valid ? ToPlatColor(s.color) : PlatColor{0,0,0,1};
         ps.r->DrawText(L"•", box.contentX() - 16.f, markerY, 16.f, 24.f, font, tc);
+    }
+
+    // Form controls (input/textarea): draw the control chrome + typed text.
+    if (box.kind == BoxKind::Replaced && box.node && ps.form) {
+        const std::string& tag = box.node->tagName;
+        if (tag == "input" || tag == "textarea") {
+            float cx = box.contentX();
+            float cy = box.contentY() - ps.scrollY + ps.topInset;
+            float cw = box.contentW;
+            float ch = box.contentH;
+            bool focused = (ps.form->focusedInput == box.node);
+            // Draw input background + border.
+            ps.r->FillRect(cx, cy, cw, ch, { 1.f, 1.f, 1.f, 1.f });
+            PlatColor border = focused ? PlatColor{0.2f,0.4f,0.8f,1} : PlatColor{0.7f,0.7f,0.7f,1};
+            ps.r->DrawRect(cx, cy, cw, ch, border, focused ? 2.f : 1.f);
+            // Draw the value text.
+            std::string val = ps.form->getValue(const_cast<Node*>(box.node));
+            if (!val.empty()) {
+                FontKey fk; fk.size = std::max(1.f, (s.fontSize > 0 ? s.fontSize : 14.f));
+                PlatFont font = GetOrCreateFont(ps, fk);
+                std::wstring wval; for (char c : val) wval += (wchar_t)(unsigned char)c;
+                ps.r->DrawText(wval, cx + 4, cy + 2, cw - 8, ch - 4, font, {0,0,0,1});
+                // Draw cursor if focused.
+                if (focused && ps.form->cursorVisible) {
+                    float cursorX = cx + 4 + ps.r->MeasureText(wval.substr(0, ps.form->cursorPos), font);
+                    ps.r->FillRect(cursorX, cy + 3, 1.f, ch - 6, {0,0,0,1});
+                }
+            } else {
+                // Placeholder.
+                std::string ph = box.node->attr("placeholder");
+                if (!ph.empty()) {
+                    FontKey fk; fk.size = std::max(1.f, (s.fontSize > 0 ? s.fontSize : 14.f));
+                    PlatFont font = GetOrCreateFont(ps, fk);
+                    std::wstring wph; for (char c : ph) wph += (wchar_t)(unsigned char)c;
+                    ps.r->DrawText(wph, cx + 4, cy + 2, cw - 8, ch - 4, font, {0.6f,0.6f,0.6f,1});
+                }
+                if (focused && ps.form->cursorVisible) {
+                    ps.r->FillRect(cx + 4, cy + 3, 1.f, ch - 6, {0,0,0,1});
+                }
+            }
+            // Register a hit region so clicks can focus this input.
+            if (ps.hits) {
+                ps.hits->push_back({ cx, cy, cw, ch, "__input__" });
+            }
+        }
     }
 }
 
