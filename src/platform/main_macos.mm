@@ -10,6 +10,7 @@
 #include "platform/browser_core.h"
 #include "platform/box_painter.h"
 #include "platform/plat_text_measure.h"
+#include "platform/form_state.h"
 #include "layout/layout_engine.h"
 #include "css/stylesheet.h"
 
@@ -35,6 +36,7 @@ static std::unique_ptr<PlatTextMeasure> g_measure;
 static std::unique_ptr<LayoutBox> g_layoutRoot;
 static std::map<std::string, PlatBitmap> g_images;
 static std::map<std::string, PlatFont> g_fontCache;
+static FormState g_formState;
 
 static Tab& CurTab() { return g_tabs[g_activeTab]; }
 
@@ -107,6 +109,7 @@ static Stylesheet CollectCSS(const Node* root) {
             ps.images = &g_images;
             ps.hits = &hits;
             ps.fontCache = &g_fontCache;
+            ps.form = &g_formState;
             PaintBoxTree(ps, *g_layoutRoot);
             tab.docHeight = g_layoutRoot->contentH + 32.f;
         }
@@ -114,10 +117,61 @@ static Stylesheet CollectCSS(const Node* root) {
     g_renderer->EndFrame();
 }
 
+- (BOOL)acceptsFirstResponder { return YES; }
+
 - (void)mouseDown:(NSEvent*)event {
     NSPoint pt = [self convertPoint:[event locationInWindow] fromView:nil];
-    // TODO: hit-test links, dispatch click events
-    (void)pt;
+    if (g_layoutRoot && !g_tabs.empty()) {
+        Node* input = FormState::hitTestInput(*g_layoutRoot, (float)pt.x, (float)pt.y, CurTab().scrollY, 0);
+        if (input) {
+            g_formState.focus(input);
+            [self setNeedsDisplay:YES];
+            return;
+        }
+        g_formState.blur();
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)keyDown:(NSEvent*)event {
+    if (!g_formState.focusedInput) { [super keyDown:event]; return; }
+    unsigned short kc = [event keyCode];
+    if (kc == 36) { // Return
+        std::string url = g_formState.buildFormQuery();
+        if (!url.empty()) {
+            g_formState.blur();
+            if (!url.empty() && url[0] == '/') {
+                std::string base = CurTab().page ? CurTab().page->url : "";
+                size_t scheme = base.find("://");
+                if (scheme != std::string::npos) {
+                    size_t slash = base.find('/', scheme + 3);
+                    url = base.substr(0, slash) + url;
+                }
+            }
+            [g_urlField setStringValue:[NSString stringWithUTF8String:url.c_str()]];
+            // TODO: trigger navigation
+        }
+        return;
+    }
+    if (kc == 51) { g_formState.backspace(); [self setNeedsDisplay:YES]; return; } // Backspace
+    if (kc == 117) { g_formState.deleteChar(); [self setNeedsDisplay:YES]; return; } // Delete
+    if (kc == 123 && g_formState.cursorPos > 0) { g_formState.cursorPos--; [self setNeedsDisplay:YES]; return; } // Left
+    if (kc == 124) { // Right
+        std::string v = g_formState.getValue(g_formState.focusedInput);
+        if (g_formState.cursorPos < v.size()) g_formState.cursorPos++;
+        [self setNeedsDisplay:YES]; return;
+    }
+    if (kc == 53) { g_formState.blur(); [self setNeedsDisplay:YES]; return; } // Escape
+    NSString* chars = [event characters];
+    if ([chars length] > 0) {
+        unichar uc = [chars characterAtIndex:0];
+        if (uc >= 32 && uc < 127) {
+            g_formState.insertChar((char)uc);
+            [self setNeedsDisplay:YES];
+            return;
+        }
+    }
+    [super keyDown:event];
 }
 
 - (void)scrollWheel:(NSEvent*)event {

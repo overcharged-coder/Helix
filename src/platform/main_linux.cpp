@@ -34,6 +34,7 @@ static std::map<std::string, PlatBitmap> g_images;
 static std::set<std::string> g_loadingImages;
 static std::set<std::string> g_failedImages;
 static std::map<std::string, PlatFont> g_fontCache;
+static FormState g_formState;
 
 static Tab& CurTab() { return g_tabs[g_activeTab]; }
 
@@ -156,6 +157,7 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
             ps.images = &g_images;
             ps.hits = &hits;
             ps.fontCache = &g_fontCache;
+            ps.form = &g_formState;
             PaintBoxTree(ps, *g_layoutRoot);
             tab.docHeight = g_layoutRoot->contentH + 32.f;
         }
@@ -293,6 +295,68 @@ static gboolean on_scroll(GtkWidget* widget, GdkEventScroll* event, gpointer dat
     return TRUE;
 }
 
+static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, gpointer data) {
+    (void)widget; (void)data;
+    if (event->button != 1 || g_tabs.empty()) return FALSE;
+    float px = (float)event->x, py = (float)event->y;
+    if (g_layoutRoot) {
+        Node* input = FormState::hitTestInput(*g_layoutRoot, px, py, CurTab().scrollY, 0);
+        if (input) {
+            g_formState.focus(input);
+            gtk_widget_set_can_focus(g_drawingArea, TRUE);
+            gtk_widget_grab_focus(g_drawingArea);
+            gtk_widget_queue_draw(g_drawingArea);
+            return TRUE;
+        }
+        g_formState.blur();
+        gtk_widget_queue_draw(g_drawingArea);
+    }
+    return FALSE;
+}
+
+static gboolean on_key_press(GtkWidget* widget, GdkEventKey* event, gpointer data) {
+    (void)widget; (void)data;
+    if (!g_formState.focusedInput) return FALSE;
+    guint key = event->keyval;
+    if (key == GDK_KEY_Return || key == GDK_KEY_KP_Enter) {
+        std::string url = g_formState.buildFormQuery();
+        if (!url.empty()) {
+            g_formState.blur();
+            // Resolve against current page URL.
+            if (!url.empty() && url[0] == '/') {
+                std::string base = CurTab().page ? CurTab().page->url : "";
+                size_t scheme = base.find("://");
+                if (scheme != std::string::npos) {
+                    size_t slash = base.find('/', scheme + 3);
+                    url = base.substr(0, slash) + url;
+                }
+            }
+            gtk_entry_set_text(GTK_ENTRY(g_urlEntry), url.c_str());
+            on_url_activate(GTK_ENTRY(g_urlEntry), nullptr);
+        }
+        return TRUE;
+    }
+    if (key == GDK_KEY_BackSpace) { g_formState.backspace(); gtk_widget_queue_draw(g_drawingArea); return TRUE; }
+    if (key == GDK_KEY_Delete)    { g_formState.deleteChar(); gtk_widget_queue_draw(g_drawingArea); return TRUE; }
+    if (key == GDK_KEY_Left && g_formState.cursorPos > 0) { g_formState.cursorPos--; gtk_widget_queue_draw(g_drawingArea); return TRUE; }
+    if (key == GDK_KEY_Right) {
+        std::string v = g_formState.getValue(g_formState.focusedInput);
+        if (g_formState.cursorPos < v.size()) g_formState.cursorPos++;
+        gtk_widget_queue_draw(g_drawingArea); return TRUE;
+    }
+    if (key == GDK_KEY_Home) { g_formState.cursorPos = 0; gtk_widget_queue_draw(g_drawingArea); return TRUE; }
+    if (key == GDK_KEY_End) { g_formState.cursorPos = g_formState.getValue(g_formState.focusedInput).size(); gtk_widget_queue_draw(g_drawingArea); return TRUE; }
+    if (key == GDK_KEY_Escape) { g_formState.blur(); gtk_widget_queue_draw(g_drawingArea); return TRUE; }
+    // Printable character.
+    guint32 uc = gdk_keyval_to_unicode(key);
+    if (uc >= 32 && uc < 127) {
+        g_formState.insertChar((char)uc);
+        gtk_widget_queue_draw(g_drawingArea);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
@@ -342,9 +406,12 @@ int main(int argc, char* argv[]) {
     gtk_widget_set_vexpand(g_drawingArea, TRUE);
     gtk_widget_set_hexpand(g_drawingArea, TRUE);
     gtk_widget_add_events(g_drawingArea,
-        GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK);
+        GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK
+        | GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK);
     g_signal_connect(g_drawingArea, "draw", G_CALLBACK(on_draw), NULL);
     g_signal_connect(g_drawingArea, "scroll-event", G_CALLBACK(on_scroll), NULL);
+    g_signal_connect(g_drawingArea, "button-press-event", G_CALLBACK(on_button_press), NULL);
+    g_signal_connect(g_drawingArea, "key-press-event", G_CALLBACK(on_key_press), NULL);
     gtk_box_pack_start(GTK_BOX(vbox), g_drawingArea, TRUE, TRUE, 0);
 
     // Status bar
