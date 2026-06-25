@@ -168,10 +168,18 @@ std::string HtmlTokenizer::decodeEntities(const std::string& raw) {
 std::map<std::string, std::string> HtmlTokenizer::consumeAttrs() {
     std::map<std::string, std::string> attrs;
     while (m_pos < m_src->size() &&
-           (*m_src)[m_pos] != '>' && (*m_src)[m_pos] != '/') {
+           (*m_src)[m_pos] != '>' && !((*m_src)[m_pos] == '/' && peek(1) == '>')) {
         skipWS();
-        if (m_pos >= m_src->size() || (*m_src)[m_pos] == '>' || (*m_src)[m_pos] == '/') break;
-        std::string name = consumeName();
+        if (m_pos >= m_src->size() || (*m_src)[m_pos] == '>'
+            || ((*m_src)[m_pos] == '/' && peek(1) == '>')) break;
+        // Attribute name: allow more characters than just alnum (data-*, aria-*, etc.)
+        std::string name;
+        while (m_pos < m_src->size()) {
+            char c = (*m_src)[m_pos];
+            if (c == '=' || c == '>' || c == '/' || std::isspace((unsigned char)c)) break;
+            name += consume();
+        }
+        for (auto& c : name) c = (char)std::tolower((unsigned char)c);
         if (name.empty()) { consume(); continue; }
         std::string value;
         skipWS();
@@ -188,12 +196,17 @@ std::map<std::string, std::string> HtmlTokenizer::consumeAttrs() {
                 } else {
                     while (m_pos < m_src->size()
                         && !std::isspace((unsigned char)(*m_src)[m_pos])
-                        && (*m_src)[m_pos] != '>')
+                        && (*m_src)[m_pos] != '>' && (*m_src)[m_pos] != '"'
+                        && (*m_src)[m_pos] != '\'')
                         value += consume();
                 }
             }
         }
-        attrs[name] = value;
+        // Decode entities in attribute values.
+        value = decodeEntities(value);
+        // First attribute wins (HTML5 spec: duplicate attrs are ignored).
+        if (attrs.find(name) == attrs.end())
+            attrs[name] = value;
     }
     return attrs;
 }
@@ -226,11 +239,21 @@ void HtmlTokenizer::tokenize(const std::string& html, Callback cb) {
         consume(); // '<'
         if (m_pos >= m_src->size()) break;
 
-        // Comments
+        // Comments — emit as Comment token (preserved in DOM for JS access).
         if (startsWith("!--")) {
             m_pos += 3;
+            size_t commentStart = m_pos;
             skipUntil("-->");
+            std::string commentData = m_src->substr(commentStart, m_pos - commentStart);
             m_pos += 3;
+            HtmlToken ct; ct.type = TokenType::Comment; ct.data = commentData; cb(ct);
+            continue;
+        }
+        // Bogus comment: <!anything> that isn't a comment or DOCTYPE.
+        if ((*m_src)[m_pos] == '!' && !startsWith("![CDATA[")
+            && toLower(m_src->substr(m_pos, 8)) != "!doctype") {
+            skipUntil(">");
+            if (m_pos < m_src->size()) consume();
             continue;
         }
         // DOCTYPE
@@ -254,11 +277,22 @@ void HtmlTokenizer::tokenize(const std::string& html, Callback cb) {
         skipWS();
         std::string tagName = consumeName();
         if (tagName.empty()) {
-            // Malformed tag — skip to >
+            // Malformed tag — skip to >. If it starts with '?', it's a processing
+            // instruction (e.g. <?xml ...?>) — also skip.
             skipUntil(">");
             if (m_pos < m_src->size()) consume();
             continue;
         }
+
+        // HTML5 tag name fixups: common misspellings and obsolete tags.
+        if (tagName == "image") tagName = "img";       // <image> → <img>
+        if (tagName == "listing") tagName = "pre";     // <listing> → <pre>
+        if (tagName == "xmp") tagName = "pre";         // <xmp> → <pre>
+        if (tagName == "plaintext") tagName = "pre";   // <plaintext> → <pre>
+        if (tagName == "acronym") tagName = "abbr";    // <acronym> → <abbr>
+        if (tagName == "dir") tagName = "ul";          // <dir> → <ul>
+        if (tagName == "center") tagName = "div";      // <center> = block (styled by CSS)
+        if (tagName == "nobr") tagName = "span";       // <nobr> → <span> (white-space handled by CSS)
 
         auto attrs = isEnd ? std::map<std::string,std::string>{}
                            : consumeAttrs();

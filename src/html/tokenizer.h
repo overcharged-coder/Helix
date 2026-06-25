@@ -3,7 +3,7 @@
 #include <map>
 #include <functional>
 
-enum class TokenType { Doctype, StartTag, EndTag, Text, EOF_ };
+enum class TokenType { Doctype, StartTag, EndTag, Text, Comment, EOF_ };
 
 struct HtmlToken {
     TokenType   type = TokenType::Text;
