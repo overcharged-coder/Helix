@@ -62,6 +62,31 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
 
     if (sy + bh < ps.topInset || sy > (float)ps.r->Height()) return;
 
+    // Box shadow (painted before background so it appears behind).
+    if (s.shadowSet && s.shadowColor.valid && s.shadowColor.a > 0.01f && !s.shadowInset) {
+        PlatColor sc = ToPlatColor(s.shadowColor);
+        float blur = s.shadowBlur;
+        float spread = s.shadowSpread;
+        float shx = sx + s.shadowX - spread;
+        float shy = sy + s.shadowY - spread;
+        float shw = bw + spread * 2;
+        float shh = bh + spread * 2;
+        if (blur < 1.f) {
+            ps.r->FillRect(shx, shy, shw, shh, sc);
+        } else {
+            // Approximate blur with concentric fading rectangles.
+            int steps = std::min((int)(blur / 2) + 1, 8);
+            for (int i = steps; i >= 0; --i) {
+                float f = (float)i / (float)steps;
+                float expand = blur * f;
+                PlatColor fc = sc;
+                fc.a = sc.a * (1.f - f) * 0.5f;
+                ps.r->FillRect(shx - expand, shy - expand,
+                              shw + expand * 2, shh + expand * 2, fc);
+            }
+        }
+    }
+
     // Background color
     if (s.bgColor.valid && s.bgColor.a > 0.001f) {
         ps.r->FillRect(sx, sy, bw, bh, ToPlatColor(s.bgColor));

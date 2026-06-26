@@ -132,6 +132,14 @@ struct ComputedStyle {
     // box-sizing: 0=content-box (default), 1=border-box
     int      boxSizing        = 0;
     bool     boxSizingSet     = false;
+    // box-shadow: offsetX, offsetY, blurRadius, spreadRadius, color.
+    float    shadowX      = 0;
+    float    shadowY      = 0;
+    float    shadowBlur   = 0;
+    float    shadowSpread = 0;
+    CssColor shadowColor;
+    bool     shadowSet    = false;
+    bool     shadowInset  = false;
     // CSS transform (simplified: one translate + one scale + one rotate).
     float    transformTx      = 0;   // translateX (px)
     float    transformTy      = 0;   // translateY (px)
@@ -280,6 +288,11 @@ struct ComputedStyle {
         if (child.widthKeyword != 0) out.widthKeyword = child.widthKeyword;
         if (child.heightKeyword != 0) out.heightKeyword = child.heightKeyword;
         if (child.boxSizingSet) { out.boxSizing = child.boxSizing; out.boxSizingSet = true; }
+        if (child.shadowSet) {
+            out.shadowX = child.shadowX; out.shadowY = child.shadowY;
+            out.shadowBlur = child.shadowBlur; out.shadowSpread = child.shadowSpread;
+            out.shadowColor = child.shadowColor; out.shadowSet = true; out.shadowInset = child.shadowInset;
+        }
         if (child.transformSet) {
             out.transformTx = child.transformTx; out.transformTy = child.transformTy;
             out.transformScale = child.transformScale; out.transformRotate = child.transformRotate;

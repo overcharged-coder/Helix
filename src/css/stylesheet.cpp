@@ -1015,6 +1015,37 @@ static void ApplyDeclaration(const std::string& prop,
     } else if (prop == "line-height") {
         float lh = ParseLineHeightValue(val, out.fontSize > 0 ? out.fontSize : 16.f);
         if (lh > 0) out.lineHeight = lh;
+    } else if (prop == "box-shadow") {
+        std::string v = sTrim(val);
+        if (sLower(v) == "none") { out.shadowSet = true; }
+        // Parse: [inset] offsetX offsetY [blur [spread]] color
+        // Tokenize respecting parens for rgb()/hsl().
+        std::vector<std::string> toks;
+        { std::string cur; int depth = 0;
+          for (char c : v) {
+              if (c == '(') ++depth; else if (c == ')' && depth > 0) --depth;
+              if (std::isspace((unsigned char)c) && depth == 0) {
+                  if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+              } else cur += c;
+          }
+          if (!cur.empty()) toks.push_back(cur);
+        }
+        bool inset = false;
+        std::vector<float> nums;
+        CssColor color = {true, 0, 0, 0, 0.3f};  // default: semi-transparent black
+        for (auto& tok : toks) {
+            if (sLower(tok) == "inset") { inset = true; continue; }
+            float f = ParseLength(tok);
+            if (f > -1e5f) { nums.push_back(f); continue; }
+            CssColor c = ParseCssColor(tok);
+            if (c.valid) color = c;
+        }
+        if (nums.size() >= 2) {
+            out.shadowX = nums[0]; out.shadowY = nums[1];
+            if (nums.size() >= 3) out.shadowBlur = nums[2];
+            if (nums.size() >= 4) out.shadowSpread = nums[3];
+            out.shadowColor = color; out.shadowInset = inset; out.shadowSet = true;
+        }
     } else if (prop == "box-sizing") {
         std::string v = sLower(sTrim(val));
         out.boxSizing = (v == "border-box") ? 1 : 0;

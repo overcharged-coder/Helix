@@ -119,6 +119,30 @@ void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float to
         if (box.kind == BoxKind::Replaced && (sy + bh < topInset || sy > (float)m_height)) return;
     }
 
+    // Box shadow.
+    if (s.shadowSet && s.shadowColor.valid && s.shadowColor.a > 0.01f && !s.shadowInset && m_rt) {
+        float blur = s.shadowBlur;
+        float spread = s.shadowSpread;
+        float shx = sx + s.shadowX - spread;
+        float shy = sy + s.shadowY - spread;
+        float shw = bw + spread * 2;
+        float shh = bh + spread * 2;
+        if (blur < 1.f) {
+            if (auto* b = TempBrush(D2D1::ColorF(s.shadowColor.r, s.shadowColor.g, s.shadowColor.b, s.shadowColor.a)))
+                m_rt->FillRectangle(D2D1::RectF(shx, shy, shx+shw, shy+shh), b);
+        } else {
+            int steps = std::min((int)(blur / 2) + 1, 8);
+            for (int i = steps; i >= 0; --i) {
+                float f = (float)i / (float)steps;
+                float expand = blur * f;
+                float a = s.shadowColor.a * (1.f - f) * 0.5f;
+                if (auto* b = TempBrush(D2D1::ColorF(s.shadowColor.r, s.shadowColor.g, s.shadowColor.b, a)))
+                    m_rt->FillRectangle(D2D1::RectF(shx-expand, shy-expand,
+                        shx+shw+expand, shy+shh+expand), b);
+            }
+        }
+    }
+
     // Background color.
     if (s.bgColor.valid && s.bgColor.a > 0.001f) {
         if (auto* b = TempBrush(ToD2Dc(s.bgColor)))
