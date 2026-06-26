@@ -1526,9 +1526,12 @@ float Engine::layoutInline(LayoutBox& box, FloatCtx* fctx) {
                 }
             }
             if (atomic) {
-                // place the atomic box at the (possibly shifted) fragment position.
-                it.box->x = fx + it.box->marginLeft;
-                it.box->y = frag.y + it.box->marginTop;
+                // Place the already-laid-out atomic subtree at the final
+                // inline position. Its child line boxes were measured at a
+                // temporary origin, so move the whole subtree together.
+                float nx = fx + it.box->marginLeft;
+                float ny = frag.y + it.box->marginTop;
+                TranslateSubtree(*it.box, nx - it.box->x, ny - it.box->y);
             }
             line.frags.push_back(frag);
             fx += it.width;

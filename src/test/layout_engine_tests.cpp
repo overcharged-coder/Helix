@@ -326,5 +326,36 @@ TestResult RunLayoutEngineTests() {
             "relative\n",
             result);
     }
+
+    // Wikipedia-style portal links use a block title followed by an inline-block
+    // article count. The count must be laid out on the next line, not flattened
+    // onto the same inline baseline as the title.
+    {
+        auto ldom = ParseHtml(
+            "<html><body><a id=\"link\" class=\"link-box\" href=\"#\">"
+            "<strong id=\"title\">English</strong>"
+            "<small id=\"count\">7,189,000+ <span>articles</span></small>"
+            "</a></body></html>");
+        auto lsheet = ParseStylesheet(
+            ".link-box { display:block; width:156px; text-align:center; }"
+            ".link-box strong { display:block; font-size:16px; line-height:20px; }"
+            ".link-box small { display:inline-block; font-size:13px; line-height:20px; }");
+        LayoutInput lin; lin.document = ldom.get(); lin.sheet = &lsheet;
+        lin.measure = &measure; lin.viewportW = 320.f; lin.viewportH = 480.f;
+        auto ll = LayoutDocument(lin);
+        auto* link = FindEngineBoxById(ll.get(), "link");
+        auto* title = FindEngineBoxById(ll.get(), "title");
+        auto* count = FindEngineBoxById(ll.get(), "count");
+        bool ok = link && title && count
+            && count->y >= title->y + title->borderBoxH() - 0.5f
+            && link->contentH >= title->marginBoxH() + count->marginBoxH() - 0.5f
+            && !count->lines.empty()
+            && !count->lines.front().frags.empty()
+            && count->lines.front().frags.front().y >= count->contentY() - 0.5f;
+        ExpectEqual("layout-engine/inline-block-count-follows-block-title",
+            ok ? "stacked\n" : "overlap\n",
+            "stacked\n",
+            result);
+    }
     return result;
 }
