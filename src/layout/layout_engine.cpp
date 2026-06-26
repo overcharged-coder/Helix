@@ -1330,7 +1330,7 @@ struct InlineItem {
 // vertical-align of the enclosing inline box down to its text/atomic descendants,
 // since vertical-align applies to the inline element, not the text node it wraps.
 static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& items,
-                          int parentVAlign = 0) {
+                          int parentVAlign = 0, float parentW = 1e6f) {
     DepthScope _d; if (g_depth > kMaxDepth) return;
     int va = box->style.verticalAlignSet ? box->style.verticalAlign : parentVAlign;
     if (box->kind == BoxKind::Text) {
@@ -1365,9 +1365,13 @@ static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& it
         return;
     }
     if (box->kind == BoxKind::InlineBlock || box->kind == BoxKind::Replaced) {
-        // Atomic: lay it out now to learn its size (shrink-to-fit to content).
+        // Atomic: lay it out to learn its size. Use the parent's content width
+        // as the containing block when the element has a percentage width
+        // (otherwise shrink-to-fit with a huge available width).
+        float cbW = (box->style.widthPercent >= 0 || box->style.maxWidthPercent >= 0)
+                  ? parentW : 1e6f;
         std::vector<LayoutBox*> pos;
-        E.layoutBox(*box, 0, 1e6f, -1, pos, nullptr);
+        E.layoutBox(*box, 0, cbW, -1, pos, nullptr);
         InlineItem it; it.type = InlineItem::Atomic; it.box = box;
         it.width = box->marginBoxW();
         FontKey f = E.fontFor(box->style);
@@ -1378,13 +1382,13 @@ static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& it
         return;
     }
     // Inline box (span/a/em…): recurse into children, carrying its vertical-align.
-    for (auto& k : box->kids) CollectInline(E, k.get(), items, va);
+    for (auto& k : box->kids) CollectInline(E, k.get(), items, va, parentW);
 }
 
 float Engine::layoutInline(LayoutBox& box, FloatCtx* fctx) {
     DepthScope _d; if (g_depth > kMaxDepth) return 0;
     std::vector<InlineItem> items;
-    for (auto& k : box.kids) CollectInline(*this, k.get(), items);
+    for (auto& k : box.kids) CollectInline(*this, k.get(), items, 0, box.contentW);
 
     float cLeft  = box.contentX();
     float cRight = box.contentX() + box.contentW;
