@@ -118,6 +118,50 @@ TestResult RunCssTests() {
     }
 
     {
+        auto dom = ParseHtml(
+            "<html><body>"
+            "<p id=\"is-hit\" class=\"target primary\"></p>"
+            "<p id=\"where-hit\" class=\"target secondary\"></p>"
+            "<p id=\"miss\" class=\"target\"></p>"
+            "<section id=\"ancestor\"><span id=\"desc\" class=\"child\"></span></section>"
+            "</body></html>");
+        auto sheet = ParseStylesheet(
+            ".target:is(.primary, .secondary) { color: red; }"
+            ".target:where(.secondary) { margin-left: 4px; color: green; }"
+            ".target { color: blue; }"
+            "#ancestor :is(.child, a) { padding-left: 3px; }"
+            ".target:is(.absent) { padding-right: 9px; }");
+        std::string actual;
+        for (const std::string id : { "is-hit", "where-hit", "miss", "desc" }) {
+            auto* node = FindElementById(dom.get(), id);
+            actual += id + ": ";
+            actual += node ? SerializeComputedStyle(sheet.resolve(node)) : "missing\n";
+        }
+        ExpectEqual("css/cascade/is-where-selectors",
+            actual,
+            "is-hit: color=1,0,0,1 \n"
+            "where-hit: color=1,0,0,1 marginLeft=4 \n"
+            "miss: color=0,0,1,1 \n"
+            "desc: paddingLeft=3 \n",
+            result);
+    }
+
+    {
+        auto dom = ParseHtml("<html><body><div id=\"target\"></div></body></html>");
+        auto* target = FindElementById(dom.get(), "target");
+        auto sheet = ParseStylesheet(
+            "#target { color: red; }"
+            "@supports (display: grid) { #target { color: blue; margin-left: 5px; } }"
+            "@supports not (display: grid) { #target { padding-left: 9px; } }"
+            "@supports (display: made-up) { #target { padding-right: 11px; } }");
+        std::string actual = target ? SerializeComputedStyle(sheet.resolve(target)) : "missing\n";
+        ExpectEqual("css/supports/display-feature-queries",
+            actual,
+            "color=0,0,1,1 marginLeft=5 \n",
+            result);
+    }
+
+    {
         auto dom = ParseHtml("<html><body class=\"category\"><div id=\"content-main\"></div><a id=\"skip\"></a></body></html>");
         auto sheet = ParseStylesheet(
             "body.category #content-main { float: right; width: 60%; overflow: hidden; }"

@@ -761,6 +761,8 @@ static void ApplyDeclaration(const std::string& prop,
         else if (v == "table-row")                                     out.display = 9;
         else if (v == "table-row-group" || v == "table-header-group"
               || v == "table-footer-group")                            out.display = 10;
+        else if (v == "flow-root")                                     out.display = 12;
+        else if (v == "contents")                                      out.display = 13;
     } else if (prop == "flex-direction") {
         out.flexDirectionSet = true;
         out.flexDirection = sLower(sTrim(val)) == "column" ? 1 : 0;
@@ -1179,6 +1181,7 @@ static void ApplyDeclaration(const std::string& prop,
         if      (v == "relative") out.positionMode = 1;
         else if (v == "absolute") out.positionMode = 2;
         else if (v == "fixed")    out.positionMode = 3;
+        else if (v == "sticky")   out.positionMode = 1; // approximate as relative until sticky scrolling exists
         else                      out.positionMode = 0;
     } else if (prop == "z-index") {
         std::string v = sLower(sTrim(val));
@@ -1302,6 +1305,52 @@ ComputedStyle ParseInlineStyle(const std::string& style) {
 
 static const Node* PreviousElementSibling(const Node* node);
 static const Node* NextElementSibling(const Node* node);
+static CssRule parseSelector(const std::string& sel);
+
+static std::vector<std::string> SplitCssList(const std::string& text) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    int parens = 0;
+    int brackets = 0;
+    char quote = 0;
+    bool escaped = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (escaped) { escaped = false; continue; }
+        if (c == '\\') { escaped = true; continue; }
+        if (quote) { if (c == quote) quote = 0; continue; }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '(') ++parens;
+        else if (c == ')' && parens > 0) --parens;
+        else if (c == '[') ++brackets;
+        else if (c == ']' && brackets > 0) --brackets;
+        else if (c == ',' && parens == 0 && brackets == 0) {
+            std::string part = sTrim(text.substr(start, i - start));
+            if (!part.empty()) parts.push_back(part);
+            start = i + 1;
+        }
+    }
+    std::string part = sTrim(text.substr(start));
+    if (!part.empty()) parts.push_back(part);
+    return parts;
+}
+
+static bool SelectorListMatches(const std::vector<std::string>& selectors, const Node* node) {
+    for (const auto& selector : selectors) {
+        if (!selector.empty() && parseSelector(selector).matches(node))
+            return true;
+    }
+    return false;
+}
+
+static int SelectorListMaxSpecificity(const std::vector<std::string>& selectors) {
+    int maxSpecificity = 0;
+    for (const auto& selector : selectors) {
+        if (!selector.empty())
+            maxSpecificity = std::max(maxSpecificity, parseSelector(selector).specificity());
+    }
+    return maxSpecificity;
+}
 
 static int ElementChildIndex(const Node* node) {
     if (!node || !node->parent) return 0;
@@ -1475,6 +1524,9 @@ static bool MatchesSimpleSelector(const CssSelectorPart& part, const Node* node)
     for (const auto& pseudo : part.pseudos) {
         if (!MatchesPseudoClass(pseudo, node)) return false;
     }
+    for (const auto& selectorList : part.matchSelectorLists) {
+        if (!SelectorListMatches(selectorList, node)) return false;
+    }
     // :not() — the node must NOT match the simple selector argument.
     for (const auto& notArg : part.notSelectors) {
         if (notArg.empty()) continue;
@@ -1531,7 +1583,8 @@ int CssRule::specificity() const {
         total += (!part.id.empty() ? 100 : 0)
                + ((int)part.classes.size() * 10)
                + (!part.attrName.empty() ? 10 : 0)
-               + (!part.tag.empty() ? 1 : 0);
+               + (!part.tag.empty() ? 1 : 0)
+               + part.functionalSpecificity;
     }
     return total;
 }
@@ -1735,6 +1788,15 @@ static CssSelectorPart parseSimpleSelectorPart(const std::string& sel) {
                     // store it as a negation pseudo. We support simple cases:
                     // :not(.class), :not(tag), :not(#id), :not([attr]).
                     part.notSelectors.push_back(sLower(argText));
+                } else if (pseudo == "is" || pseudo == "where") {
+                    auto selectorList = SplitCssList(argText);
+                    if (selectorList.empty()) {
+                        part.neverMatch = true;
+                    } else {
+                        part.matchSelectorLists.push_back(selectorList);
+                        if (pseudo == "is")
+                            part.functionalSpecificity += SelectorListMaxSpecificity(selectorList);
+                    }
                 } else {
                     part.neverMatch = true;
                 }
@@ -1769,6 +1831,7 @@ static std::vector<CssSelectorPart> parseSelectorChain(std::string selector) {
     std::string tok;
     char nextCombinator = 0;
     int bracketDepth = 0;
+    int parenDepth = 0;
     char quote = 0;
     bool escaped = false;
 
@@ -1812,12 +1875,22 @@ static std::vector<CssSelectorPart> parseSelectorChain(std::string selector) {
             tok += c;
             continue;
         }
-        if (bracketDepth == 0 && (c == '>' || c == '+' || c == '~')) {
+        if (c == '(') {
+            ++parenDepth;
+            tok += c;
+            continue;
+        }
+        if (c == ')') {
+            if (parenDepth > 0) --parenDepth;
+            tok += c;
+            continue;
+        }
+        if (bracketDepth == 0 && parenDepth == 0 && (c == '>' || c == '+' || c == '~')) {
             flushToken();
             nextCombinator = c;
             continue;
         }
-        if (bracketDepth == 0 && std::isspace((unsigned char)c)) {
+        if (bracketDepth == 0 && parenDepth == 0 && std::isspace((unsigned char)c)) {
             flushToken();
             if (!parts.empty() && nextCombinator == 0) nextCombinator = ' ';
             continue;
@@ -1950,6 +2023,116 @@ static std::vector<CssMediaCondition> CombineMediaConditions(
     return combined;
 }
 
+static bool IsKnownDisplayValue(const std::string& value) {
+    return value == "none" || value == "block" || value == "inline"
+        || value == "flex" || value == "inline-flex"
+        || value == "grid" || value == "inline-grid"
+        || value == "table" || value == "inline-table"
+        || value == "table-cell" || value == "inline-block"
+        || value == "list-item" || value == "table-row"
+        || value == "table-row-group" || value == "table-header-group"
+        || value == "table-footer-group" || value == "flow-root"
+        || value == "contents";
+}
+
+static bool IsKnownPositionValue(const std::string& value) {
+    return value == "static" || value == "relative" || value == "absolute"
+        || value == "fixed" || value == "sticky";
+}
+
+static bool SupportsPropertyValue(const std::string& feature) {
+    const size_t colon = feature.find(':');
+    if (colon == std::string::npos) return false;
+    const std::string property = sLower(sTrim(feature.substr(0, colon)));
+    const std::string value = sLower(sTrim(feature.substr(colon + 1)));
+    if (property.empty() || value.empty()) return false;
+
+    if (property == "display") return IsKnownDisplayValue(value);
+    if (property == "position") return IsKnownPositionValue(value);
+    if (property == "width" || property == "height" || property == "min-width"
+        || property == "max-width" || property == "min-height" || property == "max-height"
+        || property == "margin" || property == "margin-left" || property == "margin-right"
+        || property == "margin-top" || property == "margin-bottom" || property == "padding"
+        || property == "padding-left" || property == "padding-right" || property == "padding-top"
+        || property == "padding-bottom" || property == "top" || property == "right"
+        || property == "bottom" || property == "left" || property == "gap") {
+        return ParseLength(value) > -1e5f || value == "auto" || value == "max-content";
+    }
+    if (property == "color" || property == "background-color" || property == "border-color")
+        return ParseCssColor(value).valid || value == "transparent" || value == "currentcolor";
+    return false;
+}
+
+static bool StripOuterParens(std::string& value) {
+    value = sTrim(value);
+    if (value.size() < 2 || value.front() != '(' || value.back() != ')') return false;
+    int depth = 0;
+    char quote = 0;
+    bool escaped = false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (escaped) { escaped = false; continue; }
+        if (c == '\\') { escaped = true; continue; }
+        if (quote) { if (c == quote) quote = 0; continue; }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '(') ++depth;
+        else if (c == ')' && --depth == 0 && i + 1 != value.size()) return false;
+    }
+    value = sTrim(value.substr(1, value.size() - 2));
+    return true;
+}
+
+static std::vector<std::string> SplitTopLevelKeyword(const std::string& value,
+                                                     const std::string& keyword) {
+    std::vector<std::string> parts;
+    int parens = 0;
+    char quote = 0;
+    bool escaped = false;
+    size_t start = 0;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (escaped) { escaped = false; continue; }
+        if (c == '\\') { escaped = true; continue; }
+        if (quote) { if (c == quote) quote = 0; continue; }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '(') { ++parens; continue; }
+        if (c == ')' && parens > 0) { --parens; continue; }
+        if (parens != 0 || i + keyword.size() > value.size()) continue;
+        if (value.compare(i, keyword.size(), keyword) != 0) continue;
+        const bool leftBoundary = i == 0 || std::isspace((unsigned char)value[i - 1]);
+        const bool rightBoundary = i + keyword.size() >= value.size()
+            || std::isspace((unsigned char)value[i + keyword.size()]);
+        if (!leftBoundary || !rightBoundary) continue;
+        parts.push_back(sTrim(value.substr(start, i - start)));
+        start = i + keyword.size();
+    }
+    if (!parts.empty())
+        parts.push_back(sTrim(value.substr(start)));
+    return parts;
+}
+
+static bool SupportsConditionMatches(std::string raw) {
+    std::string value = sLower(sTrim(raw));
+    while (StripOuterParens(value)) {}
+    if (value.rfind("not ", 0) == 0)
+        return !SupportsConditionMatches(value.substr(4));
+
+    auto orParts = SplitTopLevelKeyword(value, "or");
+    if (!orParts.empty()) {
+        return std::any_of(orParts.begin(), orParts.end(),
+            [](const std::string& part) { return SupportsConditionMatches(part); });
+    }
+
+    auto andParts = SplitTopLevelKeyword(value, "and");
+    if (!andParts.empty()) {
+        return std::all_of(andParts.begin(), andParts.end(),
+            [](const std::string& part) { return SupportsConditionMatches(part); });
+    }
+
+    while (StripOuterParens(value)) {}
+    return SupportsPropertyValue(value);
+}
+
 Stylesheet ParseStylesheet(const std::string& rawCss) {
     g_emBase = 16.f;  // reset per stylesheet
     Stylesheet sheet;
@@ -1981,6 +2164,14 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
                     for (auto& rule : nested.rules) {
                         rule.media = CombineMediaConditions(conditions, rule.media);
                         sheet.rules.push_back(std::move(rule));
+                    }
+                } else if (header.rfind("@supports", 0) == 0) {
+                    if (SupportsConditionMatches(header.substr(9))) {
+                        const float outerEmBase = g_emBase;
+                        Stylesheet nested = ParseStylesheet(css.substr(lbPos + 1, rbPos - lbPos - 1));
+                        g_emBase = outerEmBase;
+                        for (auto& rule : nested.rules)
+                            sheet.rules.push_back(std::move(rule));
                     }
                 }
                 pos = rbPos + 1;
@@ -2055,10 +2246,9 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
             StoreDeclaration(property, sTrim(decl.substr(colon+1)), declStyle);
         }
 
-        // Each comma-separated selector becomes its own rule
-        std::istringstream ss(selectorBlock);
-        std::string selPart;
-        while (std::getline(ss, selPart, ',')) {
+        // Each top-level comma-separated selector becomes its own rule. Commas
+        // inside :is()/:where() arguments are part of the selector.
+        for (std::string selPart : SplitCssList(selectorBlock)) {
             selPart = sTrim(selPart);
             if (selPart.empty()) continue;
 
@@ -2097,8 +2287,12 @@ std::string SerializeComputedStyle(const ComputedStyle& style) {
     if (style.display == 3) out << "display=none ";
     else if (style.display == 1) out << "display=block ";
     else if (style.display == 2) out << "display=inline ";
+    else if (style.display == 4) out << "display=flex ";
     else if (style.display == 5) out << "display=table ";
     else if (style.display == 6) out << "display=table-cell ";
+    else if (style.display == 11) out << "display=grid ";
+    else if (style.display == 12) out << "display=flow-root ";
+    else if (style.display == 13) out << "display=contents ";
     if (style.marginTopSet()) out << "marginTop="    << style.marginTop    << " ";
     if (style.marginRightSet()) out << "marginRight="  << style.marginRight  << " ";
     if (style.marginBottomSet()) out << "marginBottom=" << style.marginBottom << " ";

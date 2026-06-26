@@ -24,6 +24,8 @@ struct CssSelectorPart {
     CssAttrMatch attrMatch = CssAttrMatch::Exists;
     std::vector<std::string> pseudos;
     std::vector<std::string> notSelectors;  // :not() argument text (simple selectors)
+    std::vector<std::vector<std::string>> matchSelectorLists; // :is()/:where() selector-list args
+    int functionalSpecificity = 0;  // max selector specificity contributed by :is()
     std::string pseudoElement;  // "before" or "after" for generated content
     bool neverMatch = false;
     char combinator = 0;   // 0=first, ' '=descendant, '>'=child, '+'=adjacent, '~'=general sibling

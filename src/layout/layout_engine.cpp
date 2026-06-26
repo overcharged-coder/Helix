@@ -259,6 +259,7 @@ BoxKind KindFromDisplay(int disp, bool replaced) {
     switch (disp) {
         case 1:  return BoxKind::Block;
         case 2:  return BoxKind::Inline;
+        case 12: return BoxKind::Block;
         case 7:  return BoxKind::InlineBlock;
         case 8:  return BoxKind::ListItem;
         case 5:  return BoxKind::Table;
@@ -307,6 +308,21 @@ void BuildChildren(const Node* node, const ComputedStyle& style, const BuildCtx&
             tb->href = href;
             out.push_back(std::move(tb));
         } else if (child->type == NodeType::Element) {
+            ComputedStyle childStyle = bc.sheet ? bc.sheet->resolve(child.get()) : ComputedStyle{};
+            InheritInto(childStyle, style);
+            ApplyUaDefaults(child->tagName, childStyle);
+            ResolveStyleVariables(childStyle);
+
+            std::string childHref = href;
+            if (child->tagName == "a") {
+                std::string rawHref = child->attr("href");
+                if (!rawHref.empty())
+                    childHref = ResolveUrlAgainstBase(rawHref, bc.baseUrl);
+            }
+            if (childStyle.isDisplayContents()) {
+                BuildChildren(child.get(), childStyle, bc, childHref, out);
+                continue;
+            }
             auto cb = BuildBox(child.get(), style, bc, href);
             if (cb) out.push_back(std::move(cb));
         }
@@ -690,6 +706,7 @@ float collapseMargins(float a, float b) {
 static bool establishesNewBfc(const ComputedStyle& s) {
     return s.floatMode != 0
         || s.positionMode == 2 || s.positionMode == 3
+        || s.isDisplayFlowRoot()
         || s.isDisplayFlex() || s.isDisplayInlineBlock()
         || s.isDisplayTableCell()
         || s.overflowHidden;

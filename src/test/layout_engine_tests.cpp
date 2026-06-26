@@ -269,5 +269,62 @@ TestResult RunLayoutEngineTests() {
             "shrunk\n",
             result);
     }
+
+    // display:contents removes the wrapper's own box but preserves children.
+    {
+        auto cdom = ParseHtml(
+            "<html><body><div id=\"wrap\"><p id=\"child\">hello</p></div></body></html>");
+        auto csheet = ParseStylesheet(
+            "#wrap { display: contents; }"
+            "#child { margin:0; height:20px; }");
+        LayoutInput cin; cin.document = cdom.get(); cin.sheet = &csheet;
+        cin.measure = &measure; cin.viewportW = 320.f; cin.viewportH = 480.f;
+        auto cl = LayoutDocument(cin);
+        auto* wrap = FindEngineBoxById(cl.get(), "wrap");
+        auto* child = FindEngineBoxById(cl.get(), "child");
+        ExpectEqual("layout-engine/display-contents-skips-wrapper-keeps-children",
+            std::string(!wrap && child ? "contents\n" : "wrapped\n"),
+            "contents\n",
+            result);
+    }
+
+    // display:flow-root establishes a new BFC, so outside floats do not intrude.
+    {
+        auto frdom = ParseHtml(
+            "<html><body><div id=\"box\">"
+            "<div id=\"side\"></div>"
+            "<div id=\"flow\"><p id=\"para\">word word word word word word word word word word word word</p></div>"
+            "</div></body></html>");
+        auto frsheet = ParseStylesheet(
+            "#box { width:400px; }"
+            "#side { float:right; width:100px; height:200px; }"
+            "#flow { display: flow-root; margin:0; }"
+            "#para { margin:0; }");
+        LayoutInput frin; frin.document = frdom.get(); frin.sheet = &frsheet;
+        frin.measure = &measure; frin.viewportW = 800.f; frin.viewportH = 600.f;
+        auto frl = LayoutDocument(frin);
+        auto* para = FindEngineBoxById(frl.get(), "para");
+        bool ignoresOutsideFloat = para && !para->lines.empty()
+            && (para->lines.front().x + para->lines.front().w) > 305.f;
+        ExpectEqual("layout-engine/flow-root-starts-new-bfc",
+            ignoresOutsideFloat ? "flow-root\n" : "intruded\n",
+            "flow-root\n",
+            result);
+    }
+
+    // position:sticky should parse as a relative-style fallback, not static.
+    {
+        auto sdom = ParseHtml("<html><body><div id=\"sticky\"></div></body></html>");
+        auto ssheet = ParseStylesheet("#sticky { position: sticky; top: 12px; }");
+        LayoutInput sin; sin.document = sdom.get(); sin.sheet = &ssheet;
+        sin.measure = &measure; sin.viewportW = 320.f; sin.viewportH = 480.f;
+        auto sl = LayoutDocument(sin);
+        auto* sticky = FindEngineBoxById(sl.get(), "sticky");
+        const bool positioned = sticky && sticky->style.positionMode == 1 && sticky->style.topSet;
+        ExpectEqual("layout-engine/sticky-falls-back-to-relative",
+            positioned ? "relative\n" : "static\n",
+            "relative\n",
+            result);
+    }
     return result;
 }
