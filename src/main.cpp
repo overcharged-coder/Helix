@@ -14,8 +14,7 @@
 #include "render/renderer.h"
 #include "platform/form_state.h"
 #include "platform/updater.h"
-// chrome.h available but not yet wired — main.cpp's types need dedup first.
-// #include "platform/chrome.h"
+#include "platform/chrome.h"
 #include "platform/box_painter.h"
 #include "js/engine.h"
 
@@ -29,24 +28,8 @@
 #include <mutex>
 #include <condition_variable>
 
-class Semaphore {
-public:
-    explicit Semaphore(int count) : m_count(count) {}
-    void acquire() { std::unique_lock<std::mutex> lk(m_mu); m_cv.wait(lk, [&]{return m_count>0;}); --m_count; }
-    void release() { {std::lock_guard<std::mutex> lk(m_mu);++m_count;} m_cv.notify_one(); }
-private:
-    std::mutex m_mu; std::condition_variable m_cv; int m_count;
-};
+// Semaphore, Page, Tab, ImageMsg, PageMsg come from browser_core.h via chrome.h.
 static Semaphore g_imageFetchGate(6);
-
-struct Page { std::string url; std::shared_ptr<Node> dom; std::string error; };
-
-struct Tab {
-    std::string url="helix://home", displayUrl, title="Helix";
-    std::shared_ptr<Page> page; float scrollY=0,docHeight=600; bool loading=false;
-    std::string pendingFragment; bool fragmentScrollPending=false;
-    std::vector<std::string> history; int histIdx=-1;
-};
 
 // ─── control IDs ─────────────────────────────────────────────────────────────
 enum : int { IDC_BACK = 101, IDC_FWRD, IDC_REFR, IDC_STOP, IDC_HOME, IDC_URL, IDC_FIND };
@@ -55,17 +38,6 @@ enum : int { IDC_BACK = 101, IDC_FWRD, IDC_REFR, IDC_STOP, IDC_HOME, IDC_URL, ID
 constexpr UINT WM_PAGE_READY  = WM_USER + 1;
 constexpr UINT WM_IMAGE_READY = WM_USER + 2;
 constexpr UINT WM_NEWTAB_NAVIGATE = WM_USER + 3;
-
-// Windows-specific message structs.
-struct ImageMsg {
-    std::string          url;
-    std::vector<uint8_t> bytes;
-};
-
-struct PageMsg {
-    int   tabIdx;
-    Page* page;
-};
 
 // ─── globals ─────────────────────────────────────────────────────────────────
 static HWND     g_hwnd;
@@ -133,65 +105,8 @@ static void UpdateTitle() {
     SetWindowTextW(g_hwnd, (t + L" \x2014 Helix").c_str());
 }
 
-static std::string LowerAscii(std::string s) {
-    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
-    return s;
-}
-static bool AttrContainsToken(const std::string& value, const std::string& token) {
-    std::string lower = LowerAscii(value);
-    size_t start = 0;
-    while (start < lower.size()) {
-        while (start < lower.size() && std::isspace((unsigned char)lower[start])) ++start;
-        size_t end = start;
-        while (end < lower.size() && !std::isspace((unsigned char)lower[end])) ++end;
-        if (lower.substr(start, end - start) == token) return true;
-        start = end;
-    }
-    return false;
-}
-static bool StylesheetMediaApplies(const std::string& media) {
-    std::string lower = LowerAscii(media);
-    if (lower.empty()) return true;
-    return lower.find("all") != std::string::npos
-        || lower.find("screen") != std::string::npos
-        || lower.find("projection") != std::string::npos;
-}
-static void LoadExternalStylesheets(const std::shared_ptr<Node>& dom, const std::string& pageUrl) {
-    if (!dom) return;
-    Node* attach = nullptr;
-    std::function<Node*(Node*)> findHead = [&](Node* n) -> Node* {
-        if (n->tagName == "head") return n;
-        for (auto& c : n->children) if (auto* h = findHead(c.get())) return h;
-        return nullptr;
-    };
-    attach = findHead(dom.get());
-    if (!attach) attach = dom.get();
-    std::vector<Node*> stack{ dom.get() };
-    int loaded = 0;
-    size_t loadedBytes = 0;
-    while (!stack.empty() && loaded < 64 && loadedBytes < 4 * 1024 * 1024) {
-        Node* n = stack.back();
-        stack.pop_back();
-        if (n->type == NodeType::Element && n->tagName == "link"
-            && AttrContainsToken(n->attr("rel"), "stylesheet")
-            && StylesheetMediaApplies(n->attr("media"))) {
-            std::string href = ResolveUrlAgainstBase(n->attr("href"), pageUrl);
-            auto res = FetchUrl(href, 1024 * 1024);
-            if (res.success && !res.body.empty()) {
-                std::string css = DecodeTextToUtf8(res.body, res.contentType);
-                loadedBytes += css.size();
-                if (loadedBytes <= 4 * 1024 * 1024) {
-                    auto style = Node::makeElement("style");
-                    style->appendChild(Node::makeText(css));
-                    attach->appendChild(style);
-                    ++loaded;
-                }
-            }
-        }
-        for (auto it = n->children.rbegin(); it != n->children.rend(); ++it)
-            stack.push_back(it->get());
-    }
-}
+// LowerAscii, AttrContainsToken, StylesheetMediaApplies, FindFirstElement,
+// LoadExternalStylesheets now come from browser_core.h via chrome.h.
 
 // ─── scrollbar ───────────────────────────────────────────────────────────────
 static int ViewportH() {
@@ -306,53 +221,13 @@ static std::string ExtractTitle(const Node* root) {
 }
 
 // ─── address-bar input: URL vs. search query ──────────────────────────────────
-// Percent-encode a search query for a URL.
-static std::string UrlEncodeQuery(const std::string& s) {
-    static const char* hex = "0123456789ABCDEF";
-    std::string out;
-    for (unsigned char c : s) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += (char)c;
-        else if (c == ' ') out += '+';
-        else { out += '%'; out += hex[c >> 4]; out += hex[c & 0xF]; }
-    }
-    return out;
-}
-
-// Decide whether address-bar text is a URL to visit or a search query.
-static bool LooksLikeUrl(const std::string& s) {
-    if (s.empty()) return false;
-    if (s.find("://") != std::string::npos) return true;          // has scheme
-    if (s.rfind("helix://", 0) == 0 || s.rfind("about:", 0) == 0) return true;
-    if (s.find(' ') != std::string::npos) return false;           // a space → search
-    if (s == "localhost" || s.rfind("localhost:", 0) == 0) return true;
-    size_t dot = s.find('.');
-    if (dot == std::string::npos) return false;                   // no dot → search
-    if (dot == 0 || dot == s.size() - 1) return false;            // ".x" / "x." → search
-    return true;                                                  // looks like a domain
-}
+// UrlEncodeQuery, LooksLikeUrl, TabPushHistory, UrlFragment, UrlWithoutFragment
+// now come from browser_core.h via chrome.h.
 
 // ─── navigation ──────────────────────────────────────────────────────────────
 static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory = true);
 static void Navigate(const std::string& rawUrl, bool push = true) {
     Navigate(g_activeTab, rawUrl, push);
-}
-
-static void TabPushHistory(Tab& tab, const std::string& url) {
-    if (tab.histIdx + 1 < (int)tab.history.size())
-        tab.history.erase(tab.history.begin() + tab.histIdx + 1, tab.history.end());
-    tab.history.push_back(url);
-    tab.histIdx = (int)tab.history.size() - 1;
-}
-
-static std::string UrlFragment(const std::string& url) {
-    size_t hash = url.find('#');
-    if (hash == std::string::npos || hash + 1 >= url.size()) return {};
-    return url.substr(hash + 1);
-}
-
-static std::string UrlWithoutFragment(const std::string& url) {
-    size_t hash = url.find('#');
-    return hash == std::string::npos ? url : url.substr(0, hash);
 }
 
 static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {

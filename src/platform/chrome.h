@@ -265,7 +265,7 @@ public:
         state.tabs.emplace_back();
         int idx = (int)state.tabs.size() - 1;
         state.activeTab = idx;
-        navigate(idx, url);
+        navigate(idx, url, true);
         return idx;
     }
 
@@ -302,8 +302,7 @@ public:
 
 private:
     void pushToHistory(Tab& tab, const std::string& url) {
-        // Use the shared pushNav from browser_core.h
-        pushNav(tab, url);
+        TabPushHistory(tab, url);
     }
 
     void updateTitle() {
