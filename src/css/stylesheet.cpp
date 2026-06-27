@@ -1266,6 +1266,44 @@ static void ApplyDeclaration(const std::string& prop,
         }
     } else if (prop == "opacity") {
         try { out.opacity = std::stof(sTrim(val)); out.opacitySet = true; } catch (...) {}
+    // Properties parsed but not yet rendered — prevents rule dropping.
+    } else if (prop == "outline" || prop == "outline-width" || prop == "outline-style"
+            || prop == "outline-color" || prop == "outline-offset") {
+        // Parsed to avoid dropping rules; no visual effect yet.
+    } else if (prop == "cursor" || prop == "pointer-events" || prop == "user-select"
+            || prop == "-webkit-user-select" || prop == "-moz-user-select") {
+        // Interaction properties — parsed but no visual effect.
+    } else if (prop == "transition" || prop == "transition-property"
+            || prop == "transition-duration" || prop == "transition-timing-function"
+            || prop == "transition-delay") {
+        // Animation properties — parsed but no visual effect yet.
+    } else if (prop == "animation" || prop == "animation-name" || prop == "animation-duration"
+            || prop == "animation-timing-function" || prop == "animation-delay"
+            || prop == "animation-iteration-count" || prop == "animation-direction"
+            || prop == "animation-fill-mode" || prop == "animation-play-state") {
+        // Animation properties — parsed but no visual effect yet.
+    } else if (prop == "will-change" || prop == "contain" || prop == "isolation"
+            || prop == "mix-blend-mode" || prop == "filter" || prop == "backdrop-filter"
+            || prop == "clip-path" || prop == "mask" || prop == "mask-image"
+            || prop == "appearance" || prop == "-webkit-appearance" || prop == "-moz-appearance"
+            || prop == "resize" || prop == "direction" || prop == "unicode-bidi"
+            || prop == "writing-mode" || prop == "accent-color" || prop == "caret-color"
+            || prop == "scroll-behavior" || prop == "overscroll-behavior"
+            || prop == "touch-action" || prop == "backface-visibility"
+            || prop == "-webkit-font-smoothing" || prop == "-moz-osx-font-smoothing"
+            || prop == "-webkit-tap-highlight-color" || prop == "-webkit-text-size-adjust"
+            || prop == "text-rendering" || prop == "font-feature-settings"
+            || prop == "font-variant" || prop == "font-variant-ligatures"
+            || prop == "font-display" || prop == "src"
+            || prop == "text-size-adjust" || prop == "tab-size"
+            || prop == "column-count" || prop == "column-gap" || prop == "columns"
+            || prop == "aspect-ratio" || prop == "place-items" || prop == "place-content"
+            || prop == "grid-template-rows" || prop == "grid-column" || prop == "grid-row"
+            || prop == "grid-area" || prop == "grid-auto-flow" || prop == "grid-auto-rows"
+            || prop == "grid-auto-columns" || prop == "row-gap"
+            || prop == "order" || prop == "counter-reset" || prop == "counter-increment"
+            || prop == "quotes" || prop == "hyphens") {
+        // Known properties parsed to prevent rule dropping. No visual effect yet.
     } else if (prop == "visibility") {
         std::string v = sLower(sTrim(val));
         out.visibilitySet = true;
