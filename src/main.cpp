@@ -14,6 +14,8 @@
 #include "render/renderer.h"
 #include "platform/form_state.h"
 #include "platform/updater.h"
+// chrome.h available but not yet wired — main.cpp's types need dedup first.
+// #include "platform/chrome.h"
 #include "platform/box_painter.h"
 #include "js/engine.h"
 
@@ -27,28 +29,24 @@
 #include <mutex>
 #include <condition_variable>
 
-// A tiny counting semaphore (C++17 has no std::counting_semaphore). Caps how
-// many image fetches run at once: firing ~50 simultaneous requests at a host
-// like Wikimedia gets the burst rate-limited (HTTP 429), so most images fail.
 class Semaphore {
 public:
     explicit Semaphore(int count) : m_count(count) {}
-    void acquire() {
-        std::unique_lock<std::mutex> lk(m_mu);
-        m_cv.wait(lk, [&] { return m_count > 0; });
-        --m_count;
-    }
-    void release() {
-        { std::lock_guard<std::mutex> lk(m_mu); ++m_count; }
-        m_cv.notify_one();
-    }
+    void acquire() { std::unique_lock<std::mutex> lk(m_mu); m_cv.wait(lk, [&]{return m_count>0;}); --m_count; }
+    void release() { {std::lock_guard<std::mutex> lk(m_mu);++m_count;} m_cv.notify_one(); }
 private:
-    std::mutex m_mu;
-    std::condition_variable m_cv;
-    int m_count;
+    std::mutex m_mu; std::condition_variable m_cv; int m_count;
 };
-// ~6 matches a typical browser's per-host connection limit.
 static Semaphore g_imageFetchGate(6);
+
+struct Page { std::string url; std::shared_ptr<Node> dom; std::string error; };
+
+struct Tab {
+    std::string url="helix://home", displayUrl, title="Helix";
+    std::shared_ptr<Page> page; float scrollY=0,docHeight=600; bool loading=false;
+    std::string pendingFragment; bool fragmentScrollPending=false;
+    std::vector<std::string> history; int histIdx=-1;
+};
 
 // ─── control IDs ─────────────────────────────────────────────────────────────
 enum : int { IDC_BACK = 101, IDC_FWRD, IDC_REFR, IDC_STOP, IDC_HOME, IDC_URL, IDC_FIND };
@@ -56,15 +54,9 @@ enum : int { IDC_BACK = 101, IDC_FWRD, IDC_REFR, IDC_STOP, IDC_HOME, IDC_URL, ID
 // ─── custom messages ──────────────────────────────────────────────────────────
 constexpr UINT WM_PAGE_READY  = WM_USER + 1;
 constexpr UINT WM_IMAGE_READY = WM_USER + 2;
-constexpr UINT WM_NEWTAB_NAVIGATE = WM_USER + 3;  // wParam=tabIdx, lParam=Page*
+constexpr UINT WM_NEWTAB_NAVIGATE = WM_USER + 3;
 
-// ─── data types ──────────────────────────────────────────────────────────────
-struct Page {
-    std::string           url;
-    std::shared_ptr<Node> dom;
-    std::string           error;
-};
-
+// Windows-specific message structs.
 struct ImageMsg {
     std::string          url;
     std::vector<uint8_t> bytes;
@@ -73,20 +65,6 @@ struct ImageMsg {
 struct PageMsg {
     int   tabIdx;
     Page* page;
-};
-
-struct Tab {
-    std::string           url      = "helix://home";
-    std::string           displayUrl;   // shown in URL bar (e.g. search query, not the bing URL)
-    std::string           title    = "Helix";
-    std::shared_ptr<Page> page;
-    float                 scrollY  = 0.f;
-    float                 docHeight= 600.f;
-    bool                  loading  = false;
-    std::string           pendingFragment;
-    bool                  fragmentScrollPending = false;
-    std::vector<std::string> history;
-    int                   histIdx  = -1;
 };
 
 // ─── globals ─────────────────────────────────────────────────────────────────

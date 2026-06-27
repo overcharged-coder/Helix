@@ -94,23 +94,35 @@ static size_t WriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata
     return bytes;
 }
 
-// ── header callback (captures Content-Type) ──────────────────────────────────
+// ── header callback (captures Content-Type + Set-Cookie) ────────────────────
+
+#include "network/cookies.h"
+
+struct HeaderCtx {
+    std::string* contentType;
+    std::string requestUrl;
+};
 
 static size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
-    auto* ct = static_cast<std::string*>(userdata);
+    auto* ctx = static_cast<HeaderCtx*>(userdata);
     size_t total = size * nitems;
     std::string line(buffer, total);
     if (StartsWithNoCase(line, "content-type:")) {
         size_t colon = line.find(':');
         std::string val = line.substr(colon + 1);
-        // Trim whitespace and trailing \r\n
         while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
         while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
-        // Strip parameters (;charset=...)
         size_t semi = val.find(';');
         if (semi != std::string::npos) val = val.substr(0, semi);
         while (!val.empty() && val.back() == ' ') val.pop_back();
-        *ct = val;
+        *ctx->contentType = val;
+    }
+    if (StartsWithNoCase(line, "set-cookie:")) {
+        size_t colon = line.find(':');
+        std::string val = line.substr(colon + 1);
+        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
+        while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
+        CookieJar::instance().handleSetCookie(val, ctx->requestUrl);
     }
     return total;
 }
@@ -170,8 +182,13 @@ FetchResult FetchUrl(const std::string& url, size_t maxResponseBytes) {
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wctx);
+    HeaderCtx hctx{&r.contentType, url};
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &r.contentType);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hctx);
+    // Send cookies from the jar.
+    std::string cookies = CookieJar::instance().cookieHeader(url);
+    if (!cookies.empty())
+        curl_easy_setopt(curl, CURLOPT_COOKIE, cookies.c_str());
     // Accept self-signed certs in v0.1 (matches the old WinINet behavior).
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);

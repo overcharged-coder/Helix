@@ -1,6 +1,7 @@
 #include "js/dom_bridge.h"
 #include "html/parser.h"
 #include "network/fetcher.h"
+#include "network/cookies.h"
 #include <algorithm>
 #include <sstream>
 #include <chrono>
@@ -752,7 +753,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         docVal.asObject()->setProp("URL",             vm.str(""));
         docVal.asObject()->setProp("readyState",      vm.str("complete"));
         docVal.asObject()->setProp("domain",          vm.str(""));
-        docVal.asObject()->setProp("cookie",          vm.str(""));
+        docVal.asObject()->setProp("cookie",          vm.str(CookieJar::instance().documentCookies(pageUrl)));
         docVal.asObject()->setProp("referrer",        vm.str(""));
         docVal.asObject()->setProp("lastModified",    vm.str(""));
         docVal.asObject()->setProp("characterSet",    vm.str("UTF-8"));
@@ -809,7 +810,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     winNavigator->setProp("language",    vm.str("en-US"));
     winNavigator->setProp("onLine",      JsValue::boolean(true));
     winNavigator->setProp("platform",    vm.str("Win32"));
-    winNavigator->setProp("cookieEnabled",JsValue::boolean(false));
+    winNavigator->setProp("cookieEnabled",JsValue::boolean(true));
     vm.setGlobal("navigator", JsValue::object(winNavigator));
 
     auto* screen = vm.gc().newObject(ObjKind::Plain);
