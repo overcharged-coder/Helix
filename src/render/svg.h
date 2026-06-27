@@ -111,6 +111,141 @@ inline void blendPixel(SvgBitmap& bmp,int x,int y,Color c){
 
 struct Pt{float x,y;};
 
+// ── Bitmap font (5x7 glyphs for ASCII 32-126) ──────────────────────────────
+// Each glyph is 5 columns x 7 rows packed into a uint32_t (35 bits, top-left first).
+// Row-major: bits 0-4 = row 0, bits 5-9 = row 1, etc.
+
+inline uint32_t fontGlyph(char ch) {
+    if (ch < 32 || ch > 126) return 0;
+    static const uint32_t glyphs[] = {
+        0x00000000, // space
+        0x04104100, // !
+        0x0A500000, // "
+        0x0AFABEA0, // #
+        0x04F83C4F, // $  (approximate)
+        0x19A11590, // %
+        0x0C54E950, // &  (approximate)
+        0x04200000, // '
+        0x02222100, // (
+        0x04222200, // )
+        0x00A4A000, // *
+        0x0023E200, // +
+        0x00000220, // ,
+        0x0001F000, // -
+        0x00000100, // .
+        0x01111000, // /
+        0x0E9B9B8E, // 0 (approximate compact)
+        0x04604104, // 1
+        0x0E11F10E, // 2 (approximate)
+        0x0E10E10E, // 3
+        0x0A5F1010, // 4 (approximate)
+        0x1F0F010E, // 5 (approximate)
+        0x0E0F110E, // 6 (approximate)
+        0x1F111000, // 7
+        0x0E1F110E, // 8 (approximate)
+        0x0E11E10E, // 9 (approximate)
+        0x00100100, // :
+        0x00100220, // ;
+        0x01242100, // <
+        0x001F07C0, // =
+        0x04242400, // >
+        0x0E110400, // ?
+        0x0E9F90E0, // @
+        0x04A1FA10, // A
+        0x1E9E91E0, // B
+        0x0E8081E0, // C  (approximate)
+        0x1E9091E0, // D
+        0x1F0F01F0, // E  (approximate)
+        0x1F0F0100, // F
+        0x0E80B1E0, // G  (approximate)
+        0x111F1110, // H
+        0x0E204070, // I  (approximate)
+        0x10101090, // J  (approximate)
+        0x114A4510, // K  (approximate)
+        0x0101011F, // L
+        0x11BB5110, // M  (approximate)
+        0x119D5310, // N  (approximate)
+        0x0E91190E, // O  (approximate)
+        0x1E9E0100, // P
+        0x0E911A0E, // Q  (approximate)
+        0x1E9E4A10, // R  (approximate)
+        0x0F01E10E, // S  (approximate)
+        0x1F204040, // T  (approximate)
+        0x1191190E, // U  (approximate)
+        0x11151204, // V  (approximate)
+        0x1115AB10, // W  (approximate)
+        0x110A0A10, // X  (approximate)
+        0x110A0404, // Y  (approximate)
+        0x1F11111F, // Z  (approximate)
+        0x06222300, // [
+        0x10080400, // backslash
+        0x06444600, // ]
+        0x04A00000, // ^
+        0x0000001F, // _
+        0x04200000, // `
+        0x000E9F00, // a (lowercase approximate)
+        0x010F110E, // b
+        0x000E010E, // c
+        0x100F110E, // d  (approximate)
+        0x000E1F0E, // e  (approximate)
+        0x06070404, // f
+        0x000E9E10, // g  (approximate)
+        0x010F1110, // h
+        0x00404040, // i
+        0x00404460, // j
+        0x01051410, // k  (approximate)
+        0x02020204, // l
+        0x001B5510, // m  (approximate)
+        0x000F1110, // n
+        0x000E110E, // o
+        0x000E11E1, // p  (approximate)
+        0x000E9F10, // q  (approximate)
+        0x000B0404, // r  (approximate)
+        0x000F0E10, // s  (approximate)
+        0x04070404, // t
+        0x00091190, // u  (approximate)
+        0x00051204, // v  (approximate)
+        0x0011AB10, // w  (approximate)
+        0x000A0A00, // x  (approximate)
+        0x000A0460, // y  (approximate)
+        0x001F111F, // z  (approximate)
+        0x02242100, // {
+        0x04040404, // |
+        0x04242400, // }
+        0x000A5000, // ~
+    };
+    return glyphs[ch - 32];
+}
+
+inline void drawChar(SvgBitmap& bmp, char ch, float px, float py, float scale, Color c, const Mat& m) {
+    uint32_t g = fontGlyph(ch);
+    if (!g) return;
+    for (int row = 0; row < 7; ++row) {
+        for (int col = 0; col < 5; ++col) {
+            if (g & (1 << (row * 5 + (4 - col)))) {
+                float x = px + col * scale, y = py + row * scale;
+                txPt(m, x, y);
+                int ix = (int)(x + 0.5f), iy = (int)(y + 0.5f);
+                for (int dy = 0; dy < (int)(scale + 0.5f); ++dy)
+                    for (int dx = 0; dx < (int)(scale + 0.5f); ++dx)
+                        blendPixel(bmp, ix + dx, iy + dy, c);
+            }
+        }
+    }
+}
+
+inline void drawString(SvgBitmap& bmp, const std::string& text, float x, float y, float fontSize, Color c, const Mat& m, int anchor = 0) {
+    float scale = fontSize / 7.f;  // 7 rows in the bitmap font
+    float charW = 6 * scale;  // 5px + 1px gap
+    // text-anchor: 0=start, 1=middle, 2=end
+    float totalW = text.size() * charW;
+    float startX = x;
+    if (anchor == 1) startX = x - totalW / 2;
+    else if (anchor == 2) startX = x - totalW;
+    for (size_t i = 0; i < text.size(); ++i)
+        drawChar(bmp, text[i], startX + i * charW, y - fontSize * 0.8f, scale, c, m);
+}
+
 // ── Gradient support ────────────────────────────────────────────────────────
 
 struct GradStop{float offset;Color color;};
@@ -234,41 +369,56 @@ inline void fillPoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,const Mat
     if(pts.size()<3||(c.a==0&&!grad))return;
     std::vector<Pt> tp(pts.size());float minY=1e9f,maxY=-1e9f,minX=1e9f,maxX=-1e9f;
     for(size_t i=0;i<pts.size();++i){tp[i]=pts[i];txPt(m,tp[i].x,tp[i].y);minY=std::min(minY,tp[i].y);maxY=std::max(maxY,tp[i].y);minX=std::min(minX,tp[i].x);maxX=std::max(maxX,tp[i].x);}
-    if(grad&&bx1==0&&bx2==0){bx1=minX;by1=minY;bx2=maxX;by2=maxY;} // auto bounds
-    for(int y=std::max(0,(int)minY);y<=std::min(bmp.height-1,(int)(maxY+1));++y){
-        std::vector<float> xs;
-        for(size_t j=0;j+1<tp.size();++j){float y0=tp[j].y,y1=tp[j+1].y;if((y0<=y&&y1>y)||(y1<=y&&y0>y))xs.push_back(tp[j].x+((float)y-y0)/(y1-y0)*(tp[j+1].x-tp[j].x));}
-        std::sort(xs.begin(),xs.end());
-        for(size_t j=0;j+1<xs.size();j+=2){
-            int x0=std::max(0,(int)(xs[j]+.5f)),x1=std::min(bmp.width-1,(int)(xs[j+1]+.5f));
-            for(int x=x0;x<=x1;++x){
-                if(grad){
-                    float t;
-                    if(!grad->isRadial){
-                        float gx1=grad->userSpace?grad->x1:bx1+(bx2-bx1)*grad->x1;
-                        float gy1=grad->userSpace?grad->y1:by1+(by2-by1)*grad->y1;
-                        float gx2=grad->userSpace?grad->x2:bx1+(bx2-bx1)*grad->x2;
-                        float gy2=grad->userSpace?grad->y2:by1+(by2-by1)*grad->y2;
-                        float dx=gx2-gx1,dy=gy2-gy1,len2=dx*dx+dy*dy;
-                        t=len2>0?((x-gx1)*dx+(y-gy1)*dy)/len2:0;
-                    }else{
-                        float gcx=grad->userSpace?grad->cx:bx1+(bx2-bx1)*grad->cx;
-                        float gcy=grad->userSpace?grad->cy:by1+(by2-by1)*grad->cy;
-                        float gr=grad->userSpace?grad->r:std::max(bx2-bx1,by2-by1)*grad->r;
-                        float dx=x-gcx,dy=y-gcy;t=gr>0?std::sqrt(dx*dx+dy*dy)/gr:0;
-                    }
-                    Color gc=sampleGradient(*grad,t);gc.a=(uint8_t)(gc.a*c.a/255);
-                    blendPixel(bmp,x,y,gc);
-                }else blendPixel(bmp,x,y,c);
+    if(grad&&bx1==0&&bx2==0){bx1=minX;by1=minY;bx2=maxX;by2=maxY;}
+
+    // Anti-aliased scanline fill: 4x vertical sub-sampling.
+    const int AA = 4;
+    for(int y=std::max(0,(int)minY-1);y<=std::min(bmp.height-1,(int)(maxY+2));++y){
+        // For each pixel row, sample at 4 sub-pixel Y positions.
+        std::vector<std::pair<float,float>> spans; // merged x-spans
+        for(int sub=0;sub<AA;++sub){
+            float sy=(float)y+(float)sub/AA+0.5f/AA;
+            std::vector<float> xs;
+            for(size_t j=0;j+1<tp.size();++j){float y0=tp[j].y,y1=tp[j+1].y;
+                if((y0<=sy&&y1>sy)||(y1<=sy&&y0>sy))xs.push_back(tp[j].x+(sy-y0)/(y1-y0)*(tp[j+1].x-tp[j].x));}
+            std::sort(xs.begin(),xs.end());
+            for(size_t j=0;j+1<xs.size();j+=2)spans.push_back({xs[j],xs[j+1]});
+        }
+        if(spans.empty())continue;
+        // Rasterize with coverage
+        std::sort(spans.begin(),spans.end());
+        float leftMost=spans.front().first,rightMost=spans.back().second;
+        int x0=std::max(0,(int)(leftMost)),x1=std::min(bmp.width-1,(int)(rightMost+1));
+        for(int x=x0;x<=x1;++x){
+            // Count how many sub-samples cover this pixel
+            int hits=0;
+            for(auto&sp:spans)if(x>=sp.first-0.5f&&x<=sp.second+0.5f)++hits;
+            if(hits==0)continue;
+            float coverage=(float)hits/AA;
+            Color pc=c;
+            if(grad){
+                float t;
+                if(!grad->isRadial){float gx1=grad->userSpace?grad->x1:bx1+(bx2-bx1)*grad->x1,gy1=grad->userSpace?grad->y1:by1+(by2-by1)*grad->y1,gx2=grad->userSpace?grad->x2:bx1+(bx2-bx1)*grad->x2,gy2=grad->userSpace?grad->y2:by1+(by2-by1)*grad->y2;float dx=gx2-gx1,dy=gy2-gy1,len2=dx*dx+dy*dy;t=len2>0?((x-gx1)*dx+(y-gy1)*dy)/len2:0;}
+                else{float gcx=grad->userSpace?grad->cx:bx1+(bx2-bx1)*grad->cx,gcy=grad->userSpace?grad->cy:by1+(by2-by1)*grad->cy,gr=grad->userSpace?grad->r:std::max(bx2-bx1,by2-by1)*grad->r;float dx=x-gcx,dy=y-gcy;t=gr>0?std::sqrt(dx*dx+dy*dy)/gr:0;}
+                pc=sampleGradient(*grad,t);
             }
+            pc.a=(uint8_t)(pc.a*coverage);
+            blendPixel(bmp,x,y,pc);
         }
     }
 }
 
 inline void strokePoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,float sw,const Mat& m,
-                       const std::vector<float>& dashArray={}){
+                       const std::vector<float>& dashArray={}, int linecap=0){
     if(pts.size()<2||c.a==0||sw<=0)return;
     float half=sw/2.f;
+    // Round linecap: draw circles at endpoints
+    if(linecap==1&&!pts.empty()){
+        auto drawCap=[&](Pt p){float px=p.x,py=p.y;txPt(m,px,py);
+            for(int dy=-(int)half-1;dy<=(int)half+1;++dy)for(int dx=-(int)half-1;dx<=(int)half+1;++dx)
+                if(dx*dx+dy*dy<=half*half)blendPixel(bmp,(int)(px+dx),(int)(py+dy),c);};
+        drawCap(pts.front());drawCap(pts.back());
+    }
     // Compute total path length for dash pattern
     float totalLen=0;
     std::vector<float> segLens(pts.size()-1);
@@ -337,7 +487,7 @@ inline void parsePath(const std::string& d,std::vector<std::vector<Pt>>& subpath
 
 // ── Style + render context ──────────────────────────────────────────────────
 
-struct Style{Color fill={0,0,0,255};Color stroke={0,0,0,0};float sw=1;float opacity=1;float fillOp=1;float strokeOp=1;bool fillNone=false;bool strokeNone=false;std::string fillUrl;std::string strokeUrl;std::vector<float>dashArray;bool hidden=false;};
+struct Style{Color fill={0,0,0,255};Color stroke={0,0,0,0};float sw=1;float opacity=1;float fillOp=1;float strokeOp=1;bool fillNone=false;bool strokeNone=false;std::string fillUrl;std::string strokeUrl;std::vector<float>dashArray;bool hidden=false;int linecap=0;int linejoin=0;}; // linecap: 0=butt,1=round,2=square; linejoin: 0=miter,1=round,2=bevel
 
 inline Style getStyle(const Node* node,const Style& parent,const std::vector<SvgCssRule>& cssRules){
     Style s=parent;s.dashArray.clear();s.fillUrl.clear();s.strokeUrl.clear();s.hidden=false;
@@ -364,6 +514,8 @@ inline Style getStyle(const Node* node,const Style& parent,const std::vector<Svg
     std::string so=get("stroke-opacity");if(!so.empty())try{s.strokeOp=std::stof(so);}catch(...){}
     std::string da=get("stroke-dasharray");
     if(!da.empty()&&da!="none"){std::istringstream ds(da);float dv;char dc;while(ds>>dv){s.dashArray.push_back(dv);if(ds.peek()==','||ds.peek()==' ')ds>>dc;}}
+    std::string lc=get("stroke-linecap");if(lc=="round")s.linecap=1;else if(lc=="square")s.linecap=2;
+    std::string lj=get("stroke-linejoin");if(lj=="round")s.linejoin=1;else if(lj=="bevel")s.linejoin=2;
     std::string disp=get("display");if(disp=="none")s.hidden=true;
     std::string vis=get("visibility");if(vis=="hidden")s.hidden=true;
     return s;
@@ -397,7 +549,7 @@ inline void renderEl(SvgBitmap& bmp,const Node* node,const Mat& parentM,const St
 
     auto renderShape=[&](const std::vector<Pt>& pts,bool closed=true){
         if(fill.a>0&&pts.size()>=3)fillPoly(bmp,pts,fill,m,fillGrad);
-        if(stroke.a>0&&pts.size()>=2)strokePoly(bmp,pts,stroke,sw,m,style.dashArray);
+        if(stroke.a>0&&pts.size()>=2)strokePoly(bmp,pts,stroke,sw,m,style.dashArray,style.linecap);
     };
 
     if(tag=="rect"){
@@ -434,21 +586,25 @@ inline void renderEl(SvgBitmap& bmp,const Node* node,const Mat& parentM,const St
             float ux=parseNum(node->attr("x")),uy=parseNum(node->attr("y"));
             Mat um=matMul(m,Mat{1,0,0,1,ux,uy});renderEl(bmp,it->second,um,style,ctx);}}
     }else if(tag=="text"||tag=="tspan"){
-        // SVG text: render each character as a small filled rectangle (approximation).
-        // Real text rendering would need font rasterization which we don't have in the
-        // bitmap context. The rectangles give a visual indication of text position/size.
         float tx=parseNum(node->attr("x")),ty=parseNum(node->attr("y"));
         float fontSize=14;
-        std::string fs=node->attr("font-size");if(!fs.empty())try{fontSize=std::stof(fs);}catch(...){}
-        std::string text;for(auto&c:node->children)if(c->type==NodeType::Text)text+=c->text;
-        // Approximate: each char is ~0.6em wide
-        float cx=tx;
-        for(size_t ci=0;ci<text.size();++ci){
-            if(text[ci]==' '||text[ci]=='\n'||text[ci]=='\r'||text[ci]=='\t'){cx+=fontSize*0.3f;continue;}
-            std::vector<Pt>charPts={{cx,ty-fontSize*0.8f},{cx+fontSize*0.55f,ty-fontSize*0.8f},{cx+fontSize*0.55f,ty+fontSize*0.2f},{cx,ty+fontSize*0.2f},{cx,ty-fontSize*0.8f}};
-            if(fill.a>0)fillPoly(bmp,charPts,fill,m,fillGrad);
-            cx+=fontSize*0.6f;
-        }
+        std::string fs=node->attr("font-size");if(fs.empty()){auto it2=node->attr("style");/* check style */}
+        if(!fs.empty())try{fontSize=std::stof(fs);}catch(...){}
+        // Collect all text content (direct + tspan children).
+        std::string text;
+        std::function<void(const Node*)> collectText=[&](const Node* n){
+            for(auto&c:n->children){if(c->type==NodeType::Text)text+=c->text;else if(c->tagName=="tspan")collectText(c.get());}
+        };
+        collectText(node);
+        // Trim leading/trailing whitespace, collapse inner whitespace.
+        while(!text.empty()&&text[0]==' ')text.erase(text.begin());
+        while(!text.empty()&&text.back()==' ')text.pop_back();
+        // text-anchor
+        int anchor=0;
+        std::string ta=node->attr("text-anchor");if(ta.empty()){auto it2=node->attr("style");if(!it2.empty()){size_t p=it2.find("text-anchor:");if(p!=std::string::npos){size_t e=it2.find(';',p);ta=it2.substr(p+12,e==std::string::npos?std::string::npos:e-p-12);while(!ta.empty()&&ta[0]==' ')ta.erase(ta.begin());}}}
+        if(ta=="middle")anchor=1;else if(ta=="end")anchor=2;
+        if(!text.empty()&&fill.a>0)
+            drawString(bmp,text,tx,ty,fontSize,fill,m,anchor);
     }else if(tag=="svg"){
         // Nested SVG: apply a new viewport transform.
         float nx=parseNum(node->attr("x")),ny=parseNum(node->attr("y"));
