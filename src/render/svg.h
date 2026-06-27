@@ -74,6 +74,7 @@ inline Color parseColor(const std::string& s) {
 struct Mat{float a=1,b=0,c=0,d=1,e=0,f=0;};
 inline Mat matMul(const Mat&l,const Mat&r){return{l.a*r.a+l.c*r.b,l.b*r.a+l.d*r.b,l.a*r.c+l.c*r.d,l.b*r.c+l.d*r.d,l.a*r.e+l.c*r.f+l.e,l.b*r.e+l.d*r.f+l.f};}
 inline void txPt(const Mat&m,float&x,float&y){float nx=m.a*x+m.c*y+m.e,ny=m.b*x+m.d*y+m.f;x=nx;y=ny;}
+inline bool invMat(const Mat&m,Mat&out){float det=m.a*m.d-m.b*m.c;if(std::abs(det)<0.000001f)return false;float id=1.f/det;out={m.d*id,-m.b*id,-m.c*id,m.a*id,(m.c*m.f-m.d*m.e)*id,(m.b*m.e-m.a*m.f)*id};return true;}
 
 inline Mat parseTransform(const std::string& s){
     Mat result;size_t pos=0;
@@ -285,9 +286,10 @@ inline void collectGradients(const Node* n, std::map<std::string,Gradient>& grad
         std::string id=n->attr("id");if(id.empty())return;
         Gradient g;
         g.isRadial=(n->tagName=="radialgradient");
-        g.userSpace=(n->attr("gradientUnits")=="userSpaceOnUse");
-        std::string gt=n->attr("gradientTransform");if(!gt.empty())g.transform=parseTransform(gt);
-        std::string sm=n->attr("spreadMethod");if(sm=="reflect")g.spread=1;else if(sm=="repeat")g.spread=2;
+        std::string units=n->attr("gradientUnits");if(units.empty())units=n->attr("gradientunits");
+        g.userSpace=(units=="userSpaceOnUse"||units=="userspaceonuse");
+        std::string gt=n->attr("gradientTransform");if(gt.empty())gt=n->attr("gradienttransform");if(!gt.empty())g.transform=parseTransform(gt);
+        std::string sm=n->attr("spreadMethod");if(sm.empty())sm=n->attr("spreadmethod");if(sm=="reflect")g.spread=1;else if(sm=="repeat")g.spread=2;
         if(!g.isRadial){
             g.x1=parseNum(n->attr("x1"));g.y1=parseNum(n->attr("y1"));
             g.x2=n->attr("x2").empty()?1.f:parseNum(n->attr("x2"));g.y2=parseNum(n->attr("y2"));
@@ -360,10 +362,22 @@ inline void collectSvgCss(const Node* n, std::vector<SvgCssRule>& rules){
 inline bool matchesSimpleSvgSel(const std::string& sel, const Node* node){
     if(sel.empty()||!node)return false;
     if(sel[0]=='.'){
-        std::string cls=sel.substr(1),nc=node->attr("class");
-        std::istringstream ss(nc);std::string tok;
-        while(ss>>tok)if(tok==cls)return true;
-        return false;
+        std::string classes=sel.substr(1),nc=node->attr("class");
+        std::istringstream cs(classes);std::string cls;
+        bool sawClass=false;
+        while(std::getline(cs,cls,'.')){
+            if(cls.empty())continue;
+            sawClass=true;
+            bool found=false;std::istringstream ss(nc);std::string tok;
+            while(ss>>tok)if(tok==cls){found=true;break;}
+            if(!found)return false;
+        }
+        return sawClass;
+    }
+    size_t dot=sel.find('.');
+    if(dot!=std::string::npos){
+        std::string tag=sel.substr(0,dot);
+        return (tag.empty()||node->tagName==tag)&&matchesSimpleSvgSel(sel.substr(dot),node);
     }
     if(sel[0]=='#')return node->attr("id")==sel.substr(1);
     return node->tagName==sel;
@@ -386,22 +400,24 @@ inline bool matchesSvgSelector(const std::string& sel, const Node* node){
         while(cur){if(matchesSvgSelector(ancestor,cur))return true;cur=cur->parent;}
         return false;
     }
-    // Handle compound selectors (e.g. "rect.cls" or ".a.b")
-    if(sel.find('.')!=std::string::npos&&sel[0]!='.'){
-        size_t dot=sel.find('.');std::string tag=sel.substr(0,dot),cls=sel.substr(dot);
-        return node->tagName==tag&&matchesSimpleSvgSel(cls,node);
-    }
     return matchesSimpleSvgSel(sel,node);
 }
 
 // ── Scanline fill + stroke ──────────────────────────────────────────────────
 
-inline void fillPoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,const Mat& m,
-                     const Gradient* grad=nullptr, float bx1=0,float by1=0,float bx2=0,float by2=0, int fillRule=0){
-    if(pts.size()<3||(c.a==0&&!grad))return;
-    std::vector<Pt> tp(pts.size());float minY=1e9f,maxY=-1e9f,minX=1e9f,maxX=-1e9f;
-    for(size_t i=0;i<pts.size();++i){tp[i]=pts[i];txPt(m,tp[i].x,tp[i].y);minY=std::min(minY,tp[i].y);maxY=std::max(maxY,tp[i].y);minX=std::min(minX,tp[i].x);maxX=std::max(maxX,tp[i].x);}
+inline void fillPolys(SvgBitmap& bmp,const std::vector<std::vector<Pt>>& paths,Color c,const Mat& m,
+                      const Gradient* grad=nullptr, float bx1=0,float by1=0,float bx2=0,float by2=0, int fillRule=0){
+    if(paths.empty()||(c.a==0&&!grad))return;
+    std::vector<std::vector<Pt>> tps;float minY=1e9f,maxY=-1e9f,minX=1e9f,maxX=-1e9f;
+    for(const auto&pts:paths){
+        if(pts.size()<3)continue;
+        std::vector<Pt> tp(pts.size());
+        for(size_t i=0;i<pts.size();++i){tp[i]=pts[i];txPt(m,tp[i].x,tp[i].y);minY=std::min(minY,tp[i].y);maxY=std::max(maxY,tp[i].y);minX=std::min(minX,tp[i].x);maxX=std::max(maxX,tp[i].x);}
+        tps.push_back(std::move(tp));
+    }
+    if(tps.empty())return;
     if(grad&&bx1==0&&bx2==0){bx1=minX;by1=minY;bx2=maxX;by2=maxY;}
+    Mat gradInv;bool hasGradInv=grad&&invMat(grad->transform,gradInv);
 
     // Anti-aliased scanline fill: 4x vertical sub-sampling.
     const int AA = 4;
@@ -410,11 +426,23 @@ inline void fillPoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,const Mat
         std::vector<std::pair<float,float>> spans; // merged x-spans
         for(int sub=0;sub<AA;++sub){
             float sy=(float)y+(float)sub/AA+0.5f/AA;
-            std::vector<float> xs;
-            for(size_t j=0;j+1<tp.size();++j){float y0=tp[j].y,y1=tp[j+1].y;
-                if((y0<=sy&&y1>sy)||(y1<=sy&&y0>sy))xs.push_back(tp[j].x+(sy-y0)/(y1-y0)*(tp[j+1].x-tp[j].x));}
-            std::sort(xs.begin(),xs.end());
-            for(size_t j=0;j+1<xs.size();j+=2)spans.push_back({xs[j],xs[j+1]});
+            if(fillRule==1){
+                std::vector<float> xs;
+                for(const auto&tp:tps)for(size_t j=0;j+1<tp.size();++j){float y0=tp[j].y,y1=tp[j+1].y;
+                    if((y0<=sy&&y1>sy)||(y1<=sy&&y0>sy))xs.push_back(tp[j].x+(sy-y0)/(y1-y0)*(tp[j+1].x-tp[j].x));}
+                std::sort(xs.begin(),xs.end());
+                for(size_t j=0;j+1<xs.size();j+=2)spans.push_back({xs[j],xs[j+1]});
+            }else{
+                std::vector<std::pair<float,int>> xs;
+                for(const auto&tp:tps)for(size_t j=0;j+1<tp.size();++j){float y0=tp[j].y,y1=tp[j+1].y;
+                    if((y0<=sy&&y1>sy)||(y1<=sy&&y0>sy)){
+                        float x=tp[j].x+(sy-y0)/(y1-y0)*(tp[j+1].x-tp[j].x);
+                        xs.push_back({x,y1>y0?1:-1});
+                    }}
+                std::sort(xs.begin(),xs.end(),[](const auto&a,const auto&b){return a.first<b.first;});
+                int winding=0;float start=0;bool open=false;
+                for(auto&hit:xs){int before=winding;winding+=hit.second;if(before==0&&winding!=0){start=hit.first;open=true;}else if(before!=0&&winding==0&&open){spans.push_back({start,hit.first});open=false;}}
+            }
         }
         if(spans.empty())continue;
         // Rasterize with coverage
@@ -430,8 +458,9 @@ inline void fillPoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,const Mat
             Color pc=c;
             if(grad){
                 float t;
-                if(!grad->isRadial){float gx1=grad->userSpace?grad->x1:bx1+(bx2-bx1)*grad->x1,gy1=grad->userSpace?grad->y1:by1+(by2-by1)*grad->y1,gx2=grad->userSpace?grad->x2:bx1+(bx2-bx1)*grad->x2,gy2=grad->userSpace?grad->y2:by1+(by2-by1)*grad->y2;float dx=gx2-gx1,dy=gy2-gy1,len2=dx*dx+dy*dy;t=len2>0?((x-gx1)*dx+(y-gy1)*dy)/len2:0;}
-                else{float gcx=grad->userSpace?grad->cx:bx1+(bx2-bx1)*grad->cx,gcy=grad->userSpace?grad->cy:by1+(by2-by1)*grad->cy,gr=grad->userSpace?grad->r:std::max(bx2-bx1,by2-by1)*grad->r;float dx=x-gcx,dy=y-gcy;t=gr>0?std::sqrt(dx*dx+dy*dy)/gr:0;}
+                float sx=(float)x,sy=(float)y;if(hasGradInv)txPt(gradInv,sx,sy);
+                if(!grad->isRadial){float gx1=grad->userSpace?grad->x1:bx1+(bx2-bx1)*grad->x1,gy1=grad->userSpace?grad->y1:by1+(by2-by1)*grad->y1,gx2=grad->userSpace?grad->x2:bx1+(bx2-bx1)*grad->x2,gy2=grad->userSpace?grad->y2:by1+(by2-by1)*grad->y2;float dx=gx2-gx1,dy=gy2-gy1,len2=dx*dx+dy*dy;t=len2>0?((sx-gx1)*dx+(sy-gy1)*dy)/len2:0;}
+                else{float gcx=grad->userSpace?grad->cx:bx1+(bx2-bx1)*grad->cx,gcy=grad->userSpace?grad->cy:by1+(by2-by1)*grad->cy,gr=grad->userSpace?grad->r:std::max(bx2-bx1,by2-by1)*grad->r;float dx=sx-gcx,dy=sy-gcy;t=gr>0?std::sqrt(dx*dx+dy*dy)/gr:0;}
                 pc=sampleGradient(*grad,t);
             }
             pc.a=(uint8_t)(pc.a*coverage);
@@ -440,17 +469,15 @@ inline void fillPoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,const Mat
     }
 }
 
+inline void fillPoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,const Mat& m,
+                     const Gradient* grad=nullptr, float bx1=0,float by1=0,float bx2=0,float by2=0, int fillRule=0){
+    fillPolys(bmp,std::vector<std::vector<Pt>>{pts},c,m,grad,bx1,by1,bx2,by2,fillRule);
+}
+
 inline void strokePoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,float sw,const Mat& m,
-                       const std::vector<float>& dashArray={}, int linecap=0){
+                       const std::vector<float>& dashArray={}, int linecap=0, int linejoin=0){
     if(pts.size()<2||c.a==0||sw<=0)return;
     float half=sw/2.f;
-    // Round linecap: draw circles at endpoints
-    if(linecap==1&&!pts.empty()){
-        auto drawCap=[&](Pt p){float px=p.x,py=p.y;txPt(m,px,py);
-            for(int dy=-(int)half-1;dy<=(int)half+1;++dy)for(int dx=-(int)half-1;dx<=(int)half+1;++dx)
-                if(dx*dx+dy*dy<=half*half)blendPixel(bmp,(int)(px+dx),(int)(py+dy),c);};
-        drawCap(pts.front());drawCap(pts.back());
-    }
     // Compute total path length for dash pattern
     float totalLen=0;
     std::vector<float> segLens(pts.size()-1);
@@ -468,20 +495,46 @@ inline void strokePoly(SvgBitmap& bmp,const std::vector<Pt>& pts,Color c,float s
         txPt(m,x1,y1);txPt(m,x2,y2);
         float segLen=std::sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
         if(segLen<0.1f){dist+=segLens[i];continue;}
-        float steps=std::max(segLen,1.f);float ix=(x2-x1)/steps,iy=(y2-y1)/steps;
-        for(float s=0;s<=steps;s+=1.f){
-            float px=x1+ix*s,py=y1+iy*s;
-            if(useDash){
-                float pos=std::fmod(dist+segLens[i]*s/steps,dashTotal);
-                float acc=0;bool draw=true;
-                for(size_t d=0;d<dashArray.size();++d){acc+=dashArray[d];if(pos<acc){draw=(d%2==0);break;}}
-                if(!draw)continue;
+        float ux=(x2-x1)/segLen,uy=(y2-y1)/segLen;
+        float sx1=x1,sy1=y1,sx2=x2,sy2=y2;
+        if(linecap==2&&i==0){sx1-=ux*half;sy1-=uy*half;}
+        if(linecap==2&&i+2==pts.size()){sx2+=ux*half;sy2+=uy*half;}
+        float minX=std::min(sx1,sx2)-half-1,maxX=std::max(sx1,sx2)+half+1;
+        float minY=std::min(sy1,sy2)-half-1,maxY=std::max(sy1,sy2)+half+1;
+        for(int py=std::max(0,(int)std::floor(minY));py<=std::min(bmp.height-1,(int)std::ceil(maxY));++py){
+            for(int px=std::max(0,(int)std::floor(minX));px<=std::min(bmp.width-1,(int)std::ceil(maxX));++px){
+                float cx=px+0.5f,cy=py+0.5f;
+                float proj=(cx-x1)*ux+(cy-y1)*uy;
+                float capProj=proj;
+                if(linecap==2){if(i==0)capProj=std::max(capProj,-half);if(i+2==pts.size())capProj=std::min(capProj,segLen+half);}
+                else capProj=std::clamp(capProj,0.f,segLen);
+                if(linecap==0&&proj<0&&i==0)continue;
+                if(linecap==0&&proj>segLen&&i+2==pts.size())continue;
+                if(linecap!=1&&proj<0&&i>0)continue;
+                if(linecap!=1&&proj>segLen&&i+2<pts.size())continue;
+                float nx=x1+ux*capProj,ny=y1+uy*capProj;
+                float dx=cx-nx,dy=cy-ny;
+                if(dx*dx+dy*dy>half*half)continue;
+                if(useDash){
+                    float pos=std::fmod(dist+std::clamp(proj,0.f,segLen),dashTotal);
+                    float acc=0;bool draw=true;
+                    for(size_t d=0;d<dashArray.size();++d){acc+=dashArray[d];if(pos<acc){draw=(d%2==0);break;}}
+                    if(!draw)continue;
+                }
+                blendPixel(bmp,px,py,c);
             }
-            for(int ty=(int)(py-half);ty<=(int)(py+half);++ty)
-                for(int tx=(int)(px-half);tx<=(int)(px+half);++tx)
-                    blendPixel(bmp,tx,ty,c);
         }
         dist+=segLens[i];
+    }
+    if(linejoin==1&&pts.size()>2){
+        for(size_t i=1;i+1<pts.size();++i){
+            float px=pts[i].x,py=pts[i].y;txPt(m,px,py);
+            for(int y=(int)std::floor(py-half-1);y<=(int)std::ceil(py+half+1);++y)
+                for(int x=(int)std::floor(px-half-1);x<=(int)std::ceil(px+half+1);++x){
+                    float dx=x+0.5f-px,dy=y+0.5f-py;
+                    if(dx*dx+dy*dy<=half*half)blendPixel(bmp,x,y,c);
+                }
+        }
     }
 }
 
@@ -529,6 +582,13 @@ inline Style getStyle(const Node* node,const Style& parent,const std::vector<Svg
         else if(k=="stroke"){if(v=="none")s.strokeNone=true;else{s.stroke=parseColor(v);s.strokeNone=false;}}
         else if(k=="stroke-width")try{s.sw=std::stof(v);}catch(...){}
         else if(k=="opacity")try{s.opacity=std::stof(v);}catch(...){}
+        else if(k=="fill-opacity")try{s.fillOp=std::stof(v);}catch(...){}
+        else if(k=="stroke-opacity")try{s.strokeOp=std::stof(v);}catch(...){}
+        else if(k=="fill-rule"){if(v=="evenodd")s.fillRule=1;else if(v=="nonzero")s.fillRule=0;}
+        else if(k=="clip-rule"&&v=="evenodd")s.fillRule=1;
+        else if(k=="stroke-linecap"){if(v=="round")s.linecap=1;else if(v=="square")s.linecap=2;else if(v=="butt")s.linecap=0;}
+        else if(k=="stroke-linejoin"){if(v=="round")s.linejoin=1;else if(v=="bevel")s.linejoin=2;else if(v=="miter")s.linejoin=0;}
+        else if(k=="stroke-dasharray"&&v!="none"){std::istringstream ds(v);float dv;char dc;while(ds>>dv){s.dashArray.push_back(dv);if(ds.peek()==','||ds.peek()==' ')ds>>dc;}}
         else if(k=="display"&&v=="none")s.hidden=true;
         else if(k=="visibility"&&v=="hidden")s.hidden=true;
     }
@@ -582,8 +642,8 @@ inline void renderEl(SvgBitmap& bmp,const Node* node,const Mat& parentM,const St
     Mat m=parentM;std::string tr=node->attr("transform");if(!tr.empty())m=matMul(m,parseTransform(tr));
 
     auto renderShape=[&](const std::vector<Pt>& pts,bool closed=true){
-        if(fill.a>0&&pts.size()>=3)fillPoly(bmp,pts,fill,m,fillGrad);
-        if(stroke.a>0&&pts.size()>=2)strokePoly(bmp,pts,stroke,sw,m,style.dashArray,style.linecap);
+        if(fill.a>0&&pts.size()>=3)fillPoly(bmp,pts,fill,m,fillGrad,0,0,0,0,style.fillRule);
+        if(stroke.a>0&&pts.size()>=2)strokePoly(bmp,pts,stroke,sw,m,style.dashArray,style.linecap,style.linejoin);
     };
 
     if(tag=="rect"){
@@ -603,11 +663,12 @@ inline void renderEl(SvgBitmap& bmp,const Node* node,const Mat& parentM,const St
         std::vector<Pt>pts;ellipseAsPoly(ccx,ccy,rx,ry,pts);renderShape(pts);
     }else if(tag=="line"){
         float x1=parseNum(node->attr("x1")),y1=parseNum(node->attr("y1")),x2=parseNum(node->attr("x2")),y2=parseNum(node->attr("y2"));
-        strokePoly(bmp,{{x1,y1},{x2,y2}},stroke.a>0?stroke:fill,sw,m,style.dashArray);
+        strokePoly(bmp,{{x1,y1},{x2,y2}},stroke.a>0?stroke:fill,sw,m,style.dashArray,style.linecap,style.linejoin);
     }else if(tag=="path"){
         std::string d=node->attr("d");if(!d.empty()){
             std::vector<std::vector<Pt>>sps;parsePath(d,sps);
-            for(auto&sp:sps){if((fill.a>0||fillGrad)&&sp.size()>=3)fillPoly(bmp,sp,fill,m,fillGrad);if(stroke.a>0&&sp.size()>=2)strokePoly(bmp,sp,stroke,sw,m,style.dashArray);}
+            if(fill.a>0||fillGrad)fillPolys(bmp,sps,fill,m,fillGrad,0,0,0,0,style.fillRule);
+            for(auto&sp:sps)if(stroke.a>0&&sp.size()>=2)strokePoly(bmp,sp,stroke,sw,m,style.dashArray,style.linecap,style.linejoin);
         }
     }else if(tag=="polygon"||tag=="polyline"){
         std::string pts=node->attr("points");std::vector<Pt>poly;std::istringstream ss(pts);float x,y;
@@ -618,7 +679,10 @@ inline void renderEl(SvgBitmap& bmp,const Node* node,const Mat& parentM,const St
         std::string href=node->attr("href");if(href.empty())href=node->attr("xlink:href");
         if(!href.empty()&&href[0]=='#'){auto it=ctx.defs.find(href.substr(1));if(it!=ctx.defs.end()){
             float ux=parseNum(node->attr("x")),uy=parseNum(node->attr("y"));
-            Mat um=matMul(m,Mat{1,0,0,1,ux,uy});renderEl(bmp,it->second,um,style,ctx);}}
+            Mat um=matMul(m,Mat{1,0,0,1,ux,uy});
+            if(it->second->tagName=="symbol"){
+                for(auto&child:it->second->children)renderEl(bmp,child.get(),um,style,ctx);
+            }else renderEl(bmp,it->second,um,style,ctx);}}
     }else if(tag=="text"||tag=="tspan"){
         float tx=parseNum(node->attr("x")),ty=parseNum(node->attr("y"));
         float fontSize=14;
@@ -663,7 +727,7 @@ inline SvgBitmap renderSvg(const Node* svgNode,int maxDim=512){
     bmp.width=std::max(1,(int)(w*scale));bmp.height=std::max(1,(int)(h*scale));
     bmp.pixels.resize(bmp.width*bmp.height*4,0);
     // preserveAspectRatio parsing
-    std::string par=svgNode->attr("preserveAspectRatio");
+    std::string par=svgNode->attr("preserveAspectRatio");if(par.empty())par=svgNode->attr("preserveaspectratio");
     bool parNone=(par.find("none")!=std::string::npos);
     int alignX=1,alignY=1; // 0=Min,1=Mid,2=Max
     if(par.find("xMin")!=std::string::npos)alignX=0;else if(par.find("xMax")!=std::string::npos)alignX=2;
