@@ -144,6 +144,8 @@ struct ComputedStyle {
     // CSS transform (simplified: one translate + one scale + one rotate).
     float    transformTx      = 0;   // translateX (px)
     float    transformTy      = 0;   // translateY (px)
+    bool     transformTxPercent = false;
+    bool     transformTyPercent = false;
     float    transformScale   = 1;   // scale factor
     float    transformRotate  = 0;   // rotation (degrees)
     bool     transformSet     = false;
@@ -298,6 +300,8 @@ struct ComputedStyle {
         }
         if (child.transformSet) {
             out.transformTx = child.transformTx; out.transformTy = child.transformTy;
+            out.transformTxPercent = child.transformTxPercent;
+            out.transformTyPercent = child.transformTyPercent;
             out.transformScale = child.transformScale; out.transformRotate = child.transformRotate;
             out.transformSet = true;
         }

@@ -1070,29 +1070,44 @@ static void ApplyDeclaration(const std::string& prop,
                 std::string argStr = v.substr(paren + 1, end - paren - 1);
                 // Split args by comma.
                 std::vector<float> fargs;
+                std::vector<bool> pctArgs;
                 std::istringstream as(argStr);
                 std::string tok;
                 while (std::getline(as, tok, ',')) {
-                    float f = ParseLength(sTrim(tok));
+                    std::string t = sTrim(tok);
+                    bool isPct = !t.empty() && t.back() == '%';
+                    float f = isPct ? -100000.f : ParseLength(t);
                     if (f <= -1e5f) {
                         // Try deg
-                        std::string t = sTrim(tok);
                         size_t deg = t.find("deg");
-                        if (deg != std::string::npos) {
+                        if (isPct) {
+                            try { f = std::stof(t.substr(0, t.size() - 1)); } catch (...) { f = 0; }
+                        } else if (deg != std::string::npos) {
                             try { f = std::stof(t.substr(0, deg)); } catch (...) { f = 0; }
                         } else {
                             try { f = std::stof(t); } catch (...) { f = 0; }
                         }
                     }
                     fargs.push_back(f);
+                    pctArgs.push_back(isPct);
                 }
                 if (fn == "translate" && fargs.size() >= 1) {
                     out.transformTx = fargs[0];
-                    if (fargs.size() >= 2) out.transformTy = fargs[1];
+                    out.transformTxPercent = pctArgs.size() >= 1 && pctArgs[0];
+                    if (fargs.size() >= 2) {
+                        out.transformTy = fargs[1];
+                        out.transformTyPercent = pctArgs.size() >= 2 && pctArgs[1];
+                    }
                 } else if (fn == "translatex") {
-                    if (!fargs.empty()) out.transformTx = fargs[0];
+                    if (!fargs.empty()) {
+                        out.transformTx = fargs[0];
+                        out.transformTxPercent = !pctArgs.empty() && pctArgs[0];
+                    }
                 } else if (fn == "translatey") {
-                    if (!fargs.empty()) out.transformTy = fargs[0];
+                    if (!fargs.empty()) {
+                        out.transformTy = fargs[0];
+                        out.transformTyPercent = !pctArgs.empty() && pctArgs[0];
+                    }
                 } else if (fn == "scale" && !fargs.empty()) {
                     out.transformScale = fargs[0];
                 } else if (fn == "rotate" && !fargs.empty()) {

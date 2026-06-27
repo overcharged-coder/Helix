@@ -51,6 +51,19 @@ inline PlatFont GetOrCreateFont(PaintState& ps, const FontKey& f) {
     return pf;
 }
 
+inline std::wstring NodeTextContentWide(const Node* n) {
+    if (!n) return {};
+    if (n->type == NodeType::Text) {
+        std::wstring out;
+        out.reserve(n->text.size());
+        for (unsigned char c : n->text) out += (wchar_t)c;
+        return out;
+    }
+    std::wstring out;
+    for (const auto& child : n->children) out += NodeTextContentWide(child.get());
+    return out;
+}
+
 // ── paint functions ──────────────────────────────────────────────────────────
 
 inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
@@ -209,19 +222,36 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
         ps.r->DrawText(L"•", box.contentX() - 16.f, markerY, 16.f, 24.f, font, tc);
     }
 
-    // Form controls (input/textarea): draw the control chrome + typed text.
+    // Form controls: draw the control chrome + typed text.
     if (box.kind == BoxKind::Replaced && box.node && ps.form) {
         const std::string& tag = box.node->tagName;
-        if (tag == "input" || tag == "textarea") {
+        if (tag == "input" || tag == "textarea" || tag == "button" || tag == "select") {
             float cx = box.contentX();
             float cy = box.contentY() - ps.scrollY + ps.topInset;
             float cw = box.contentW;
             float ch = box.contentH;
             bool focused = (ps.form->focusedInput == box.node);
             // Draw input background + border.
-            ps.r->FillRect(cx, cy, cw, ch, { 1.f, 1.f, 1.f, 1.f });
+            ps.r->FillRect(cx, cy, cw, ch,
+                tag == "button" ? PlatColor{0.94f,0.94f,0.94f,1.f}
+                                : PlatColor{1.f,1.f,1.f,1.f});
             PlatColor border = focused ? PlatColor{0.2f,0.4f,0.8f,1} : PlatColor{0.7f,0.7f,0.7f,1};
             ps.r->DrawRect(cx, cy, cw, ch, border, focused ? 2.f : 1.f);
+            if (tag == "button" || tag == "select") {
+                FontKey fk; fk.size = std::max(1.f, (s.fontSize > 0 ? s.fontSize : 14.f));
+                fk.bold = s.bold; fk.italic = s.italic; fk.family = s.fontFamily;
+                PlatFont font = GetOrCreateFont(ps, fk);
+                std::wstring label = NodeTextContentWide(box.node);
+                if (!label.empty())
+                    ps.r->DrawText(label, cx + 8, cy + 2, cw - 16, ch - 4, font, {0.08f,0.08f,0.08f,1});
+                if (tag == "select") {
+                    float ax = cx + cw - 15.f;
+                    float ay = cy + ch * 0.5f - 2.f;
+                    ps.r->DrawLine(ax, ay, ax + 4.f, ay + 4.f, {0.2f,0.2f,0.2f,1}, 1.5f);
+                    ps.r->DrawLine(ax + 4.f, ay + 4.f, ax + 8.f, ay, {0.2f,0.2f,0.2f,1}, 1.5f);
+                }
+                return;
+            }
             // Draw the value text.
             std::string val = ps.form->getValue(const_cast<Node*>(box.node));
             if (!val.empty()) {
@@ -312,11 +342,17 @@ inline void PaintBoxTree(PaintState& ps, const LayoutBox& box) {
     // Scale and rotate would need native matrix support per-renderer.
     float savedScrollY = ps.scrollY;
     float savedTopInset = ps.topInset;
+    float tx = box.style.transformTxPercent
+        ? box.borderBoxW() * (box.style.transformTx / 100.f)
+        : box.style.transformTx;
+    float ty = box.style.transformTyPercent
+        ? box.borderBoxH() * (box.style.transformTy / 100.f)
+        : box.style.transformTy;
     if (box.style.transformSet) {
-        ps.topInset += box.style.transformTy;
+        ps.topInset += ty;
         // Horizontal translate: shift all x coords by adjusting the box's
         // paint origin. We cast away const to apply the offset temporarily.
-        const_cast<LayoutBox&>(box).x += box.style.transformTx;
+        const_cast<LayoutBox&>(box).x += tx;
     }
 
     // Decorations
@@ -372,7 +408,7 @@ inline void PaintBoxTree(PaintState& ps, const LayoutBox& box) {
 
     // Restore transform offsets.
     if (box.style.transformSet) {
-        const_cast<LayoutBox&>(box).x -= box.style.transformTx;
+        const_cast<LayoutBox&>(box).x -= tx;
         ps.scrollY = savedScrollY;
         ps.topInset = savedTopInset;
     }

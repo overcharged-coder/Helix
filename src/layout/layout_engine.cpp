@@ -72,6 +72,18 @@ std::wstring ToWide(const std::string& s) {
     return w;
 }
 
+std::string TextContent(const Node* n) {
+    if (!n) return {};
+    if (n->type == NodeType::Text) return n->text;
+    std::string out;
+    for (const auto& child : n->children) out += TextContent(child.get());
+    return out;
+}
+
+bool HasAttr(const Node* n, const std::string& name) {
+    return n && n->attrs.find(name) != n->attrs.end();
+}
+
 // UA default display for an element tag (used when CSS doesn't set display).
 // Returns one of the ComputedStyle display codes (1=block,2=inline,7=inline-block,
 // 8=list-item,5=table,9=table-row,6=table-cell,10=row-group).
@@ -418,6 +430,8 @@ std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& paren
     DepthScope _d; if (g_depth > kMaxDepth) return nullptr;
     const std::string& tag = node->tagName;
     if (IsSkippedTag(tag)) return nullptr;
+    if (HasAttr(node, "hidden")) return nullptr;
+    if (tag == "dialog" && !HasAttr(node, "open")) return nullptr;
 
     ComputedStyle s = bc.sheet ? bc.sheet->resolve(node) : ComputedStyle{};
     if (s.isDisplayNone()) return nullptr;
@@ -471,8 +485,35 @@ std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& paren
             }
         }
         if (formControl) {
-            box->intrinsicW = (tag == "textarea") ? 180.f : 140.f;
-            box->intrinsicH = (tag == "textarea") ? 60.f : 22.f;
+            if (tag == "textarea") {
+                box->intrinsicW = 180.f;
+                box->intrinsicH = 64.f;
+            } else if (tag == "button") {
+                float textW = 0.f;
+                if (bc.measure) {
+                    FontKey fk;
+                    fk.size = std::max(1.f, s.fontSize > 0 ? s.fontSize : 14.f);
+                    fk.bold = s.bold;
+                    fk.italic = s.italic;
+                    fk.family = s.fontFamily;
+                    textW = bc.measure->MeasureText(ToWide(TextContent(node)), fk);
+                }
+                box->intrinsicW = std::max(56.f, textW + 24.f);
+                box->intrinsicH = 32.f;
+            } else if (tag == "select") {
+                float textW = 0.f;
+                if (bc.measure) {
+                    FontKey fk;
+                    fk.size = std::max(1.f, s.fontSize > 0 ? s.fontSize : 14.f);
+                    fk.family = s.fontFamily;
+                    textW = bc.measure->MeasureText(ToWide(TextContent(node)), fk);
+                }
+                box->intrinsicW = std::max(56.f, textW + 28.f);
+                box->intrinsicH = 32.f;
+            } else {
+                box->intrinsicW = 180.f;
+                box->intrinsicH = 32.f;
+            }
         }
         if (tag == "svg") {
             // Parse viewBox or width/height for intrinsic size.

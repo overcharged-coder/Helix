@@ -210,6 +210,23 @@ TestResult RunCssTests() {
     }
 
     {
+        auto dom = ParseHtml("<html><body><div id=\"logo\"></div></body></html>");
+        auto sheet = ParseStylesheet("#logo { transform: translate(-50%, -25%) scale(1.2); }");
+        auto* node = FindElementById(dom.get(), "logo");
+        auto cs = sheet.resolve(node);
+        char buf[256];
+        snprintf(buf, sizeof buf,
+            "tx=%g txPct=%d ty=%g tyPct=%d scale=%g\n",
+            cs.transformTx, cs.transformTxPercent ? 1 : 0,
+            cs.transformTy, cs.transformTyPercent ? 1 : 0,
+            cs.transformScale);
+        ExpectEqual("css/transform/translate-percent-preserved",
+            std::string(buf),
+            "tx=-50 txPct=1 ty=-25 tyPct=1 scale=1.2\n",
+            result);
+    }
+
+    {
         // Shorthand carries position + repeat: "url() <x> <y> no-repeat".
         auto dom = ParseHtml("<html><body><i id=\"s\"></i></body></html>");
         auto sheet = ParseStylesheet(

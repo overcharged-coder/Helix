@@ -357,5 +357,122 @@ TestResult RunLayoutEngineTests() {
             "stacked\n",
             result);
     }
+
+    // UA default: a <dialog> without the open attribute is not rendered.
+    {
+        auto ddom = ParseHtml(
+            "<html><body><dialog id=\"closed\">hidden</dialog>"
+            "<dialog id=\"open\" open>visible</dialog></body></html>");
+        auto dsheet = ParseStylesheet("");
+        LayoutInput din; din.document = ddom.get(); din.sheet = &dsheet;
+        din.measure = &measure; din.viewportW = 480.f; din.viewportH = 320.f;
+        auto dl = LayoutDocument(din);
+        auto* closed = FindEngineBoxById(dl.get(), "closed");
+        auto* open = FindEngineBoxById(dl.get(), "open");
+        ExpectEqual("layout-engine/dialog-closed-is-display-none-by-default",
+            std::string(!closed && open ? "hidden\n" : "visible\n"),
+            "hidden\n",
+            result);
+    }
+
+    // External SVGs should still be treated as requestable replaced images.
+    {
+        auto sdom = ParseHtml("<html><body><img id=\"mark\" src=\"/static/mark.svg\"></body></html>");
+        auto ssheet = ParseStylesheet("");
+        FixedMeasure svgMeasure;
+        LayoutInput sin; sin.document = sdom.get(); sin.sheet = &ssheet;
+        sin.measure = &svgMeasure; sin.viewportW = 320.f; sin.viewportH = 240.f;
+        sin.baseUrl = "https://www.wikipedia.org/portal/index.html";
+        LayoutDocument(sin);
+        const std::string requested = svgMeasure.requestedImages.empty()
+            ? "none\n" : svgMeasure.requestedImages.front() + "\n";
+        ExpectEqual("layout-engine/external-svg-img-requests-image",
+            requested,
+            "https://www.wikipedia.org/static/mark.svg\n",
+            result);
+    }
+
+    // Distilled Wikipedia portal: an absolute logo centered in a relative
+    // language cluster and language links placed by percentage offsets.
+    {
+        auto pdom = ParseHtml(
+            "<html><body><div id=\"portal\">"
+            "<div id=\"logo\"></div><a id=\"lang1\">English</a><a id=\"lang2\">Deutsch</a>"
+            "</div></body></html>");
+        auto psheet = ParseStylesheet(
+            "body { margin:0; }"
+            "#portal { position:relative; width:600px; height:400px; margin-left:auto; margin-right:auto; }"
+            "#logo { position:absolute; width:200px; height:180px; left:50%; top:20px; margin-left:-100px; }"
+            "#lang1, #lang2 { position:absolute; width:160px; height:40px; }"
+            "#lang1 { left:10%; top:120px; }"
+            "#lang2 { right:10%; top:120px; }");
+        LayoutInput pin; pin.document = pdom.get(); pin.sheet = &psheet;
+        pin.measure = &measure; pin.viewportW = 1000.f; pin.viewportH = 600.f;
+        auto pl = LayoutDocument(pin);
+        auto* portal = FindEngineBoxById(pl.get(), "portal");
+        auto* logo = FindEngineBoxById(pl.get(), "logo");
+        auto* lang1 = FindEngineBoxById(pl.get(), "lang1");
+        auto* lang2 = FindEngineBoxById(pl.get(), "lang2");
+        bool ok = portal && logo && lang1 && lang2
+            && (int)(portal->x + .5f) == 200
+            && (int)(logo->x - portal->contentX() + .5f) == 200
+            && (int)(lang1->x - portal->contentX() + .5f) == 60
+            && (int)(portal->contentX() + portal->contentW - lang2->x - lang2->borderBoxW() + .5f) == 60;
+        ExpectEqual("layout-engine/wikipedia-portal-absolute-cluster",
+            ok ? "positioned\n" : "misplaced\n",
+            "positioned\n",
+            result);
+    }
+
+    // Search controls need tag-specific intrinsic sizes rather than every
+    // control becoming a generic 140px block.
+    {
+        auto fdom = ParseHtml(
+            "<html><body><form id=\"search\"><input id=\"q\"><button id=\"go\">Search</button>"
+            "<select id=\"lang\"><option>EN</option></select></form></body></html>");
+        auto fsheet = ParseStylesheet("#search { width:500px; margin:0; } #q { width:300px; }");
+        LayoutInput fin; fin.document = fdom.get(); fin.sheet = &fsheet;
+        fin.measure = &measure; fin.viewportW = 800.f; fin.viewportH = 400.f;
+        auto fl = LayoutDocument(fin);
+        auto* q = FindEngineBoxById(fl.get(), "q");
+        auto* go = FindEngineBoxById(fl.get(), "go");
+        auto* lang = FindEngineBoxById(fl.get(), "lang");
+        bool ok = q && go && lang
+            && (int)(q->contentW + .5f) == 300
+            && go->contentW >= 56.f && go->contentW < 100.f
+            && lang->contentW >= 48.f && lang->contentW < 100.f
+            && go->contentH >= 28.f && lang->contentH >= 28.f;
+        ExpectEqual("layout-engine/form-controls-have-useful-intrinsic-sizes",
+            ok ? "sized\n" : "generic\n",
+            "sized\n",
+            result);
+    }
+
+    // Dense language lists should wrap into multiple inline lines inside the
+    // container instead of overflowing as one massive line.
+    {
+        auto wdom = ParseHtml(
+            "<html><body><ul id=\"langs\">"
+            "<li>Afar</li><li>Deutsch</li><li>English</li><li>Español</li><li>Français</li>"
+            "<li>Italiano</li><li>Polski</li><li>Português</li><li>Русский</li><li>日本語</li>"
+            "</ul></body></html>");
+        auto wsheet = ParseStylesheet(
+            "#langs { width:240px; margin:0; padding-left:0; }"
+            "#langs li { display:inline; margin-right:12px; }");
+        LayoutInput win; win.document = wdom.get(); win.sheet = &wsheet;
+        win.measure = &measure; win.viewportW = 800.f; win.viewportH = 400.f;
+        auto wl = LayoutDocument(win);
+        auto* langs = FindEngineBoxById(wl.get(), "langs");
+        bool wraps = langs && langs->establishesInline && langs->lines.size() >= 2;
+        bool clamped = wraps;
+        if (wraps) {
+            for (const auto& line : langs->lines)
+                clamped = clamped && line.w <= langs->contentW + 0.5f;
+        }
+        ExpectEqual("layout-engine/dense-inline-language-list-wraps",
+            wraps && clamped ? "wrapped\n" : "overflow\n",
+            "wrapped\n",
+            result);
+    }
     return result;
 }

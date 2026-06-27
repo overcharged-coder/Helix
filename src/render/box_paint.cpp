@@ -13,6 +13,19 @@
 static D2D1_COLOR_F ToD2Dc(const CssColor& c) { return { c.r, c.g, c.b, c.a }; }
 static constexpr size_t kMaxMeasuredTextChars = 16 * 1024;
 
+static std::wstring NodeTextContentWide(const Node* n) {
+    if (!n) return {};
+    if (n->type == NodeType::Text) {
+        std::wstring out;
+        out.reserve(n->text.size());
+        for (unsigned char c : n->text) out += (wchar_t)c;
+        return out;
+    }
+    std::wstring out;
+    for (const auto& child : n->children) out += NodeTextContentWide(child.get());
+    return out;
+}
+
 static std::string FontCacheKey(const FontKey& f) {
     std::string k = std::to_string((int)(f.size * 4));
     k += f.bold ? "b" : "-";
@@ -265,6 +278,58 @@ void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float to
         }
     }
 
+    // Form controls: draw simple native-ish chrome for atomic controls that
+    // are not backed by an image resource.
+    if (box.kind == BoxKind::Replaced && box.node && box.replacedUrl.empty()) {
+        const std::string& tag = box.node->tagName;
+        if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button") {
+            float cx = box.contentX();
+            float cy = box.contentY() - scrollY + topInset;
+            float cw = box.contentW;
+            float ch = box.contentH;
+            auto* fill = TempBrush(tag == "button"
+                ? D2D1::ColorF(0.94f, 0.94f, 0.94f, 1.f)
+                : D2D1::ColorF(1.f, 1.f, 1.f, 1.f));
+            auto* border = TempBrush(D2D1::ColorF(0.62f, 0.62f, 0.62f, 1.f));
+            if (fill) m_rt->FillRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), fill);
+            if (border) m_rt->DrawRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), border, 1.f);
+
+            std::wstring label;
+            if (tag == "button" || tag == "select") label = NodeTextContentWide(box.node);
+            if (label.empty() && tag == "input") {
+                std::string ph = box.node->attr("placeholder");
+                for (unsigned char c : ph) label += (wchar_t)c;
+            }
+            if (!label.empty()) {
+                FontKey fk;
+                fk.size = std::clamp((s.fontSize > 0 ? s.fontSize : 14.f) * m_zoom, 1.f, 32.f);
+                fk.bold = s.bold;
+                fk.italic = s.italic;
+                fk.family = s.fontFamily;
+                if (auto* fmt = FormatForKey(fk)) {
+                    auto* textBrush = TempBrush(tag == "input"
+                        ? D2D1::ColorF(0.45f, 0.45f, 0.45f, 1.f)
+                        : D2D1::ColorF(0.08f, 0.08f, 0.08f, 1.f));
+                    if (textBrush) {
+                        float tx = tag == "button" ? 8.f : 6.f;
+                        m_rt->DrawText(label.c_str(), (UINT32)label.size(), fmt,
+                            D2D1::RectF(cx + tx, cy + 2.f, cx + cw - 8.f, cy + ch - 2.f),
+                            textBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    }
+                }
+            }
+            if (tag == "select") {
+                auto* arrow = TempBrush(D2D1::ColorF(0.2f, 0.2f, 0.2f, 1.f));
+                if (arrow) {
+                    float ax = cx + cw - 15.f;
+                    float ay = cy + ch * 0.5f - 2.f;
+                    m_rt->DrawLine(D2D1::Point2F(ax, ay), D2D1::Point2F(ax + 4.f, ay + 4.f), arrow, 1.5f);
+                    m_rt->DrawLine(D2D1::Point2F(ax + 4.f, ay + 4.f), D2D1::Point2F(ax + 8.f, ay), arrow, 1.5f);
+                }
+            }
+        }
+    }
+
     // Borders.
     auto side = [&](const CssColor& c) -> ID2D1SolidColorBrush* {
         if (c.valid) return TempBrush(ToD2Dc(c));
@@ -396,11 +461,16 @@ void Renderer::PaintBox(const LayoutBox& box, float scrollY, float topInset, boo
         m_rt->GetTransform(&oldTransform);
         float cx = box.x + box.borderBoxW() / 2;
         float cy = box.y - effScroll + topInset + box.borderBoxH() / 2;
+        float tx = box.style.transformTxPercent
+            ? box.borderBoxW() * (box.style.transformTx / 100.f)
+            : box.style.transformTx * m_zoom;
+        float ty = box.style.transformTyPercent
+            ? box.borderBoxH() * (box.style.transformTy / 100.f)
+            : box.style.transformTy * m_zoom;
         auto mat = D2D1::Matrix3x2F::Translation(-cx, -cy)
                  * D2D1::Matrix3x2F::Scale(box.style.transformScale, box.style.transformScale)
                  * D2D1::Matrix3x2F::Rotation(box.style.transformRotate)
-                 * D2D1::Matrix3x2F::Translation(cx + box.style.transformTx,
-                                                  cy + box.style.transformTy);
+                 * D2D1::Matrix3x2F::Translation(cx + tx, cy + ty);
         m_rt->SetTransform(mat * oldTransform);
     }
 

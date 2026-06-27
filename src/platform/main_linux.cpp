@@ -11,10 +11,12 @@
 #include "platform/box_painter.h"
 #include "platform/plat_text_measure.h"
 #include "platform/updater.h"
+#include "render/svg.h"
 #include "third_party/stb_image.h"
 #include <set>
 #include "layout/layout_engine.h"
 #include "css/stylesheet.h"
+#include <cctype>
 
 // ── globals ──────────────────────────────────────────────────────────────────
 
@@ -49,9 +51,32 @@ struct LinuxImageMsg {
 
 static void ProcessImage(const std::string& url, const std::vector<uint8_t>& bytes) {
     if (!g_renderer || bytes.empty()) { g_failedImages.insert(url); return; }
+    auto looksLikeSvgUrl = [](const std::string& u) {
+        std::string low;
+        for (char c : u) low += (char)std::tolower((unsigned char)c);
+        return low.find(".svg") != std::string::npos
+            || low.find("image/svg+xml") != std::string::npos;
+    };
     int w = 0, h = 0, channels = 0;
-    unsigned char* pixels = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &channels, 4);
-    if (!pixels || w <= 0 || h <= 0) { if (pixels) stbi_image_free(pixels); g_failedImages.insert(url); return; }
+    unsigned char* stbiPixels = nullptr;
+    std::vector<uint8_t> svgPixels;
+    uint8_t* pixels = nullptr;
+    bool fromStbi = false;
+    if (looksLikeSvgUrl(url) || svg::looksLikeSvgBytes(bytes)) {
+        auto bmp = svg::renderSvgBytes(bytes, 2048);
+        if (bmp.width > 0 && bmp.height > 0 && !bmp.pixels.empty()) {
+            w = bmp.width;
+            h = bmp.height;
+            svgPixels = std::move(bmp.pixels);
+            pixels = svgPixels.data();
+        }
+    }
+    if (!pixels) {
+        stbiPixels = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &channels, 4);
+        pixels = stbiPixels;
+        fromStbi = true;
+    }
+    if (!pixels || w <= 0 || h <= 0) { if (stbiPixels) stbi_image_free(stbiPixels); g_failedImages.insert(url); return; }
     // stb_image outputs RGBA; Cairo wants ARGB32 (BGRA premultiplied on little-endian).
     for (int i = 0; i < w * h; ++i) {
         unsigned char* p = pixels + i * 4;
@@ -63,7 +88,7 @@ static void ProcessImage(const std::string& url, const std::vector<uint8_t>& byt
         p[3] = a;
     }
     PlatBitmap bmp = g_renderer->CreateBitmap(w, h, pixels);
-    stbi_image_free(pixels);
+    if (fromStbi) stbi_image_free(stbiPixels);
     if (bmp) {
         auto it = g_images.find(url);
         if (it != g_images.end() && it->second) g_renderer->ReleaseBitmap(it->second);
