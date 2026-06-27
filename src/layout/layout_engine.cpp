@@ -191,6 +191,8 @@ void InheritInto(ComputedStyle& s, const ComputedStyle& parent) {
     if (s.lineHeight <= 0 && parent.lineHeight > 0)      s.lineHeight = parent.lineHeight;
     if (!s.textAlignSet && parent.textAlignSet) { s.textAlign = parent.textAlign; s.textAlignSet = true; }
     if (!s.textIndentSet && parent.textIndentSet) { s.textIndent = parent.textIndent; s.textIndentSet = true; }
+    if (!s.letterSpacingSet && parent.letterSpacingSet) { s.letterSpacing = parent.letterSpacing; s.letterSpacingSet = true; }
+    if (!s.wordBreakSet && parent.wordBreakSet) { s.wordBreak = parent.wordBreak; s.wordBreakSet = true; }
     if (!s.textTransformSet && parent.textTransformSet) { s.textTransform = parent.textTransform; s.textTransformSet = true; }
     if (!s.whiteSpaceSet && parent.whiteSpaceSet) {
         s.whiteSpaceNowrap = parent.whiteSpaceNowrap;
@@ -1411,6 +1413,9 @@ static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& it
             std::wstring word = t.substr(i, j - i);
             InlineItem it; it.type = InlineItem::Word; it.text = word; it.box = box; it.font = f;
             it.width = E.in.measure ? E.in.measure->MeasureText(word, f) : (float)word.size() * f.size * 0.5f;
+            // letter-spacing: add extra width per character
+            if (box->style.letterSpacingSet && box->style.letterSpacing != 0)
+                it.width += box->style.letterSpacing * E.Z * (float)word.size();
             it.ascent = asc; it.lineH = lh; it.vAlign = va;
             items.push_back(it);
             i = j;

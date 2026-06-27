@@ -747,6 +747,21 @@ static void ApplyDeclaration(const std::string& prop,
         out.whiteSpaceSet = true;
         out.whiteSpaceNowrap = (v == "nowrap" || v == "pre");
         out.whiteSpacePre = (v == "pre" || v == "pre-wrap" || v == "pre-line");
+    } else if (prop == "letter-spacing") {
+        std::string v = sLower(sTrim(val));
+        if (v != "normal") { float f = ParseLength(val); if (f > -1e5f) { out.letterSpacing = f; out.letterSpacingSet = true; } }
+        else { out.letterSpacing = 0; out.letterSpacingSet = true; }
+    } else if (prop == "word-break" || prop == "overflow-wrap" || prop == "word-wrap") {
+        std::string v = sLower(sTrim(val));
+        out.wordBreakSet = true;
+        if (v == "break-all") out.wordBreak = 1;
+        else if (v == "break-word") out.wordBreak = 2;
+        else if (v == "anywhere") out.wordBreak = 2;
+        else out.wordBreak = 0;
+    } else if (prop == "text-overflow") {
+        std::string v = sLower(sTrim(val));
+        out.textOverflowSet = true;
+        out.textOverflow = (v == "ellipsis") ? 1 : 0;
     } else if (prop == "display") {
         std::string v = sLower(sTrim(val));
         if      (v == "none")                                          out.display = 3;
