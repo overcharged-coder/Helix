@@ -198,6 +198,10 @@ struct ComputedStyle {
     // Grid tracks remain CSS tokens until their containing block is known.
     std::vector<std::string> gridTemplateColumns;
     bool     gridTemplateColumnsSet = false;
+    std::vector<std::string> gridTemplateRows;
+    bool     gridTemplateRowsSet = false;
+    int      gridColumnStart = 0, gridColumnEnd = 0; // 0 = auto
+    int      gridRowStart = 0, gridRowEnd = 0;
     // Linear gradient.
     struct GradientStop { CssColor color; float pos = -1; }; // pos: 0..1, -1=auto
     float    gradientAngle    = 180;  // degrees (0=to top, 90=to right, 180=to bottom)
@@ -351,10 +355,12 @@ struct ComputedStyle {
         if (child.alignSelfSet) { out.alignSelf = child.alignSelf; out.alignSelfSet = true; }
         if (child.gradientSet) { out.gradientAngle = child.gradientAngle; out.gradientStops = child.gradientStops; out.gradientSet = true; }
         if (child.flexGap >= 0) out.flexGap = child.flexGap;
-        if (child.gridTemplateColumnsSet) {
-            out.gridTemplateColumns = child.gridTemplateColumns;
-            out.gridTemplateColumnsSet = true;
-        }
+        if (child.gridTemplateColumnsSet) { out.gridTemplateColumns = child.gridTemplateColumns; out.gridTemplateColumnsSet = true; }
+        if (child.gridTemplateRowsSet) { out.gridTemplateRows = child.gridTemplateRows; out.gridTemplateRowsSet = true; }
+        if (child.gridColumnStart) out.gridColumnStart = child.gridColumnStart;
+        if (child.gridColumnEnd) out.gridColumnEnd = child.gridColumnEnd;
+        if (child.gridRowStart) out.gridRowStart = child.gridRowStart;
+        if (child.gridRowEnd) out.gridRowEnd = child.gridRowEnd;
         for (const auto& [name, value] : child.customProperties)
             out.customProperties[name] = value;
         out.deferredDeclarations.insert(out.deferredDeclarations.end(),

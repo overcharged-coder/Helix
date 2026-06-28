@@ -62,8 +62,14 @@ struct CssRule {
     bool matches(const Node* node) const;
 };
 
+struct FontFace {
+    std::string family;
+    std::string srcUrl;
+};
+
 struct Stylesheet {
     std::vector<CssRule> rules;
+    std::vector<FontFace> fontFaces;
     float viewportWidth = 800.f;
     float viewportHeight = 600.f;
 

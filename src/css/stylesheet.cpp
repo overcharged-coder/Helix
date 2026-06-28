@@ -884,10 +884,31 @@ static void ApplyDeclaration(const std::string& prop,
         if (parsed >= 0) out.flexGap = parsed;
     } else if (prop == "grid-template-columns") {
         auto tracks = SplitGridTracks(sTrim(val));
-        if (!tracks.empty()) {
-            out.gridTemplateColumns = std::move(tracks);
-            out.gridTemplateColumnsSet = true;
-        }
+        if (!tracks.empty()) { out.gridTemplateColumns = std::move(tracks); out.gridTemplateColumnsSet = true; }
+    } else if (prop == "grid-template-rows") {
+        auto tracks = SplitGridTracks(sTrim(val));
+        if (!tracks.empty()) { out.gridTemplateRows = std::move(tracks); out.gridTemplateRowsSet = true; }
+    } else if (prop == "grid-column") {
+        // grid-column: start / end or just start
+        std::string v = sTrim(val); size_t slash = v.find('/');
+        if (slash != std::string::npos) {
+            try { out.gridColumnStart = std::stoi(sTrim(v.substr(0, slash))); } catch (...) {}
+            try { out.gridColumnEnd = std::stoi(sTrim(v.substr(slash + 1))); } catch (...) {}
+        } else { try { out.gridColumnStart = std::stoi(v); } catch (...) {} }
+    } else if (prop == "grid-row") {
+        std::string v = sTrim(val); size_t slash = v.find('/');
+        if (slash != std::string::npos) {
+            try { out.gridRowStart = std::stoi(sTrim(v.substr(0, slash))); } catch (...) {}
+            try { out.gridRowEnd = std::stoi(sTrim(v.substr(slash + 1))); } catch (...) {}
+        } else { try { out.gridRowStart = std::stoi(v); } catch (...) {} }
+    } else if (prop == "grid-column-start") {
+        try { out.gridColumnStart = std::stoi(sTrim(val)); } catch (...) {}
+    } else if (prop == "grid-column-end") {
+        try { out.gridColumnEnd = std::stoi(sTrim(val)); } catch (...) {}
+    } else if (prop == "grid-row-start") {
+        try { out.gridRowStart = std::stoi(sTrim(val)); } catch (...) {}
+    } else if (prop == "grid-row-end") {
+        try { out.gridRowEnd = std::stoi(sTrim(val)); } catch (...) {}
     } else if (prop == "margin") {
         std::istringstream vs(val); std::vector<float> v;
         std::string tok;
@@ -1340,7 +1361,6 @@ static void ApplyDeclaration(const std::string& prop,
             || prop == "text-size-adjust" || prop == "tab-size"
             || prop == "columns"
             || prop == "place-items" || prop == "place-content"
-            || prop == "grid-template-rows" || prop == "grid-column" || prop == "grid-row"
             || prop == "grid-area" || prop == "grid-auto-flow" || prop == "grid-auto-rows"
             || prop == "grid-auto-columns"
             || prop == "order" || prop == "counter-reset" || prop == "counter-increment"
@@ -2282,6 +2302,39 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
                         g_emBase = outerEmBase;
                         for (auto& rule : nested.rules)
                             sheet.rules.push_back(std::move(rule));
+                    }
+                } else if (header.rfind("@font-face", 0) == 0) {
+                    // Parse @font-face { font-family: X; src: url(...); }
+                    std::string body = css.substr(lbPos + 1, rbPos - lbPos - 1);
+                    std::string family, srcUrl;
+                    // Extract font-family and src url.
+                    ComputedStyle ffs;
+                    std::istringstream fss(body); std::string fdecl;
+                    while (std::getline(fss, fdecl, ';')) {
+                        size_t colon = fdecl.find(':');
+                        if (colon == std::string::npos) continue;
+                        std::string prop = sLower(sTrim(fdecl.substr(0, colon)));
+                        std::string val = sTrim(fdecl.substr(colon + 1));
+                        if (prop == "font-family") {
+                            family = val;
+                            // Strip quotes
+                            while (!family.empty() && (family.front()=='"'||family.front()=='\'')) family.erase(family.begin());
+                            while (!family.empty() && (family.back()=='"'||family.back()=='\'')) family.pop_back();
+                        } else if (prop == "src") {
+                            // Find url() in src
+                            size_t u = val.find("url(");
+                            if (u != std::string::npos) {
+                                size_t e = val.find(')', u + 4);
+                                if (e != std::string::npos) {
+                                    srcUrl = sTrim(val.substr(u + 4, e - u - 4));
+                                    while (!srcUrl.empty() && (srcUrl.front()=='"'||srcUrl.front()=='\'')) srcUrl.erase(srcUrl.begin());
+                                    while (!srcUrl.empty() && (srcUrl.back()=='"'||srcUrl.back()=='\'')) srcUrl.pop_back();
+                                }
+                            }
+                        }
+                    }
+                    if (!family.empty() && !srcUrl.empty()) {
+                        sheet.fontFaces.push_back({family, srcUrl});
                     }
                 }
                 pos = rbPos + 1;

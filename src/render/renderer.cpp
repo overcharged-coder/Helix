@@ -1,6 +1,7 @@
 #include "render/renderer.h"
 #include "layout/layout_engine.h"
 #include "css/stylesheet.h"
+#include "render/webfont.h"
 #include "network/url.h"
 #include "render/svg.h"
 #include "third_party/stb_image.h"
@@ -410,6 +411,9 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
     if (doc) {
         sheet  = CollectStylesheet(doc.get());
         pageBg = FindBodyBgColor(doc.get(), sheet);
+        // Load @font-face web fonts.
+        if (!sheet.fontFaces.empty())
+            WebFontLoader::instance().loadFonts(sheet, baseUrl, [this]() { InvalidateLayout(); });
     }
 
     // transparent body bg → default white (HwndRenderTarget clear with a=0 shows window black)
