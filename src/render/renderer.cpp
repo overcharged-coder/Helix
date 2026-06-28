@@ -209,7 +209,9 @@ void Renderer::ReceiveImage(const std::string& url, const std::vector<uint8_t>& 
     uint8_t* pixels = nullptr;
     bool fromStbi = false;
     if (LooksLikeSvgUrl(url) || svg::looksLikeSvgBytes(bytes)) {
-        auto bmp = svg::renderSvgBytes(bytes, 2048);
+        // Cap SVG decode size based on data size — small icons don't need 2048px.
+        int svgMaxDim = bytes.size() < 4096 ? 256 : (bytes.size() < 32768 ? 512 : 1024);
+        auto bmp = svg::renderSvgBytes(bytes, svgMaxDim);
         if (bmp.width > 0 && bmp.height > 0 && !bmp.pixels.empty()) {
             w = bmp.width;
             h = bmp.height;

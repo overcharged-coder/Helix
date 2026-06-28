@@ -16,6 +16,7 @@
 #include "platform/chrome.h"
 #include "platform/box_painter.h"
 #include "js/engine.h"
+#include "js/dom_bridge.h"
 
 #include <string>
 #include <thread>
@@ -792,14 +793,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::string href = g_renderer.HitTest((float)px, (float)py);
             SetCursor(href.empty() ? g_cursorArrow : g_cursorHand);
             SetStatus(href);
-            // Track :hover node for CSS hover styles.
+            // Track :hover node for CSS hover styles (throttled to ~30Hz).
             if (g_renderer.GetLayoutRoot()) {
-                const Node* hover = FormState::hitTestNode(*g_renderer.GetLayoutRoot(),
-                    (float)px, (float)py, CurTab().scrollY, (float)TOP_INSET);
-                if (hover != g_hoverNode) {
-                    g_hoverNode = hover;
-                    g_renderer.InvalidateLayout();
-                    InvalidateRect(hwnd, NULL, FALSE);
+                static DWORD lastHoverTick = 0;
+                DWORD now = GetTickCount();
+                if (now - lastHoverTick >= 33) { // ~30Hz
+                    const Node* hover = FormState::hitTestNode(*g_renderer.GetLayoutRoot(),
+                        (float)px, (float)py, CurTab().scrollY, (float)TOP_INSET);
+                    if (hover != g_hoverNode) {
+                        g_hoverNode = hover;
+                        lastHoverTick = now;
+                        // Only invalidate paint, not layout — hover mostly affects
+                        // colors/opacity, not geometry. Full layout rebuild is expensive.
+                        InvalidateRect(hwnd, NULL, FALSE);
+                    }
                 }
             }
         } else {
@@ -807,7 +814,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetStatus({});
             if (g_hoverNode) {
                 g_hoverNode = nullptr;
-                g_renderer.InvalidateLayout();
                 InvalidateRect(hwnd, NULL, FALSE);
             }
         }
@@ -831,6 +837,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_TIMER:
+        resetDomDirtyCoalesce(); // Allow next batch of DOM mutations to trigger repaint.
         try {
             g_js.runMacrotasks();
         } catch (...) {

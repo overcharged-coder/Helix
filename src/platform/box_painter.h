@@ -179,7 +179,8 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
         float cy = box.contentY() - ps.scrollY + ps.topInset;
         if (box.replacedUrl == "__svg__" && box.node) {
             // Render inline SVG to a bitmap on the fly.
-            auto svgBmp = svg::renderSvg(box.node, (int)std::max(box.contentW, box.contentH));
+            int svgMax = std::min(1024, (int)std::max(box.contentW, box.contentH));
+            auto svgBmp = svg::renderSvg(box.node, std::max(16, svgMax));
             if (svgBmp.width > 0 && svgBmp.height > 0) {
                 PlatBitmap bmp = ps.r->CreateBitmap(svgBmp.width, svgBmp.height, svgBmp.pixels.data());
                 if (bmp) {

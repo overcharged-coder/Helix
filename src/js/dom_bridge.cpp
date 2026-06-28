@@ -205,13 +205,24 @@ static DomMetrics computeDomMetrics(Node* n) {
     m.width = s.width >= 0 ? s.width : parseFloatOr(n->attr("width"), -1.f);
     m.height = s.height >= 0 ? s.height : parseFloatOr(n->attr("height"), -1.f);
 
+    auto directTextLen = [](Node* node) {
+        size_t len = 0;
+        for (const auto& child : node->children) {
+            if (child && child->type == NodeType::Text) {
+                len += child->text.size();
+                if (len > 4096) return len;
+            }
+        }
+        return len;
+    };
+
     if (m.width < 0) {
-        std::string text = textContent(n);
-        m.width = text.empty() ? 0.f : std::max(16.f, (float)text.size() * 8.f);
-        if (!text.empty()) m.width += 8.f;
+        size_t textLen = directTextLen(n);
+        m.width = textLen == 0 ? 0.f : std::max(16.f, (float)textLen * 8.f);
+        if (textLen > 0) m.width += 8.f;
     }
     if (m.height < 0) {
-        m.height = !textContent(n).empty() ? std::max(16.f, s.lineHeight > 0 ? s.lineHeight : 16.f) : 0.f;
+        m.height = directTextLen(n) > 0 ? std::max(16.f, s.lineHeight > 0 ? s.lineHeight : 16.f) : 0.f;
     }
 
     float padX = std::max(0.f, s.paddingLeft) + std::max(0.f, s.paddingRight);
@@ -293,11 +304,21 @@ static void notifyMutationObservers(VM& vm, Node* target, const std::string& typ
     }
 }
 
+static bool g_domDirtyCoalesced = false;
+
 static void markDomDirty(VM& vm, Node* target, const std::string& type) {
     vm.domDirty = true;
     notifyMutationObservers(vm, target, type);
-    if (vm.onDomDirty) vm.onDomDirty();
+    // Coalesce: set flag instead of repainting per-mutation.
+    // The platform's timer tick (WM_TIMER / g_timeout_add) will repaint once.
+    if (!g_domDirtyCoalesced && vm.onDomDirty) {
+        g_domDirtyCoalesced = true;
+        vm.onDomDirty();
+    }
 }
+
+// Call this from the platform timer to reset coalescing for the next batch.
+void resetDomDirtyCoalesce() { g_domDirtyCoalesced = false; }
 
 static bool CanEagerSerialize(Node* n) {
     if (!n) return false;

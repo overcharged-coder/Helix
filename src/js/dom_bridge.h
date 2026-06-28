@@ -18,3 +18,6 @@ Node* unwrapNode(JsValue val);
 
 // Dispatch an event (e.g. "click") on a DOM node, calling registered listeners.
 void dispatchDomEvent(VM& vm, Node* target, const std::string& eventName);
+
+// Reset DOM dirty coalescing — call from platform timer tick.
+void resetDomDirtyCoalesce();
