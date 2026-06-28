@@ -45,7 +45,12 @@ TestResult RunHtmlTests() {
 
     {
         std::string actual = SerializeDom(ParseHtml("<p>A&nbsp;B</p>"));
-        std::string expected = "#document\n  <p>\n    #text \"A" + std::string("\xC2\xA0") + "B\"\n";
+        std::string expected =
+            "#document\n"
+            "  <html>\n"
+            "    <body>\n"
+            "      <p>\n"
+            "        #text \"A" + std::string("\xC2\xA0") + "B\"\n";
         ExpectEqual("html/dom/non-breaking-space", actual, expected, result);
     }
 
@@ -61,8 +66,9 @@ TestResult RunHtmlTests() {
             "      <div class=\"picture\">\n"
             "        <p>\n"
             "        <table>\n"
-            "          <tr>\n"
-            "            <td>\n"
+            "          <tbody>\n"
+            "            <tr>\n"
+            "              <td>\n"
             "        <p class=\"bad\">\n"
             "        <blockquote class=\"first one\">\n"
             "        <div class=\"forehead\">\n";

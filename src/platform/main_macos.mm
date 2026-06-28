@@ -8,6 +8,7 @@
 #import <Cocoa/Cocoa.h>
 #include "platform/platform.h"
 #include "platform/chrome.h"
+#include "platform/chrome_theme.h"
 #include "platform/box_painter.h"
 #include "platform/plat_text_measure.h"
 #include "layout/layout_engine.h"
@@ -41,6 +42,23 @@ static std::map<std::string, PlatBitmap> g_images;
 static std::map<std::string, PlatFont> g_fontCache;
 
 static Tab& CurTab() { return g_tabs[g_activeTab]; }
+
+static NSColor* ThemeColor(helix::chrome_theme::Rgb c, CGFloat alpha = 1.0) {
+    return [NSColor colorWithCalibratedRed:(CGFloat)c.r / 255.0
+                                     green:(CGFloat)c.g / 255.0
+                                      blue:(CGFloat)c.b / 255.0
+                                     alpha:alpha];
+}
+
+static void StyleToolbarButton(NSButton* button) {
+    if (!button) return;
+    using namespace helix::chrome_theme;
+    [button setBezelStyle:NSBezelStyleRounded];
+    [button setFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]];
+    [button setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [[button widthAnchor] constraintEqualToConstant:ButtonWidth].active = YES;
+    [[button heightAnchor] constraintEqualToConstant:ButtonHeight].active = YES;
+}
 
 static Stylesheet CollectCSS(const Node* root) {
     Stylesheet sheet;
@@ -291,27 +309,49 @@ int main(int argc, const char* argv[]) {
         NSButton* reloadBtn = [NSButton buttonWithTitle:@"↻" target:toolbarTarget action:@selector(reload:)];
         NSButton* homeBtn = [NSButton buttonWithTitle:@"⌂" target:toolbarTarget action:@selector(goHome:)];
 
-        g_urlField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 800, 24)];
+        StyleToolbarButton(backBtn);
+        StyleToolbarButton(fwdBtn);
+        StyleToolbarButton(reloadBtn);
+        StyleToolbarButton(homeBtn);
+
+        g_urlField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 800, helix::chrome_theme::ButtonHeight)];
         [g_urlField setPlaceholderString:@"Enter URL or search..."];
         [g_urlField setDelegate:delegate];
+        [g_urlField setFont:[NSFont systemFontOfSize:14]];
+        [g_urlField setTextColor:ThemeColor(helix::chrome_theme::Ink)];
+        [g_urlField setBackgroundColor:ThemeColor(helix::chrome_theme::Active)];
+        [g_urlField setBezeled:YES];
+        [g_urlField setTranslatesAutoresizingMaskIntoConstraints:NO];
 
         NSStackView* toolbar = [NSStackView stackViewWithViews:@[backBtn, fwdBtn, reloadBtn, homeBtn, g_urlField]];
         [toolbar setOrientation:NSUserInterfaceLayoutOrientationHorizontal];
-        [toolbar setSpacing:4];
+        [toolbar setSpacing:helix::chrome_theme::Gap];
+        [toolbar setEdgeInsets:NSEdgeInsetsMake(
+            helix::chrome_theme::Margin,
+            helix::chrome_theme::Margin,
+            helix::chrome_theme::Margin,
+            helix::chrome_theme::Margin)];
+        [toolbar setWantsLayer:YES];
+        [toolbar.layer setBackgroundColor:[ThemeColor(helix::chrome_theme::Panel) CGColor]];
         [toolbar setTranslatesAutoresizingMaskIntoConstraints:NO];
+        [g_urlField setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                               forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [g_urlField setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
 
         // Browser view
         g_view = [[HelixView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 760)];
         [g_view setTranslatesAutoresizingMaskIntoConstraints:NO];
 
         // Status bar
-        g_statusField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 1280, 20)];
+        g_statusField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 1280, helix::chrome_theme::StatusHeight)];
         [g_statusField setBezeled:NO];
         [g_statusField setEditable:NO];
         [g_statusField setSelectable:NO];
-        [g_statusField setBackgroundColor:[NSColor windowBackgroundColor]];
+        [g_statusField setDrawsBackground:YES];
+        [g_statusField setBackgroundColor:ThemeColor(helix::chrome_theme::Rail)];
         [g_statusField setFont:[NSFont systemFontOfSize:11]];
-        [g_statusField setTextColor:[NSColor secondaryLabelColor]];
+        [g_statusField setTextColor:ThemeColor(helix::chrome_theme::Quiet)];
         [g_statusField setTranslatesAutoresizingMaskIntoConstraints:NO];
 
         [contentView addSubview:toolbar];
@@ -320,14 +360,18 @@ int main(int argc, const char* argv[]) {
 
         // Auto Layout constraints
         NSDictionary* views = NSDictionaryOfVariableBindings(toolbar, g_view, g_statusField);
+        NSDictionary* metrics = @{
+            @"toolbarH": @(helix::chrome_theme::ToolbarHeight),
+            @"statusH": @(helix::chrome_theme::StatusHeight)
+        };
         [contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[toolbar]|"
             options:0 metrics:nil views:views]];
         [contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[g_view]|"
             options:0 metrics:nil views:views]];
         [contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[g_statusField]|"
             options:0 metrics:nil views:views]];
-        [contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[toolbar(==36)][g_view][g_statusField(==20)]|"
-            options:0 metrics:nil views:views]];
+        [contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[toolbar(==toolbarH)][g_view][g_statusField(==statusH)]|"
+            options:0 metrics:metrics views:views]];
 
         // Wire chrome callbacks and init.
         g_chrome.cb.repaint = []() { if (g_view) [g_view setNeedsDisplay:YES]; };

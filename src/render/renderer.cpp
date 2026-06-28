@@ -4,6 +4,7 @@
 #include "render/webfont.h"
 #include "render/transition.h"
 #include "network/url.h"
+#include "platform/chrome_theme.h"
 #include "render/svg.h"
 #include "third_party/stb_image.h"
 #pragma comment(lib, "d2d1.lib")
@@ -20,6 +21,9 @@
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 static D2D1_COLOR_F ToD2D(const CssColor& c) { return { c.r, c.g, c.b, c.a }; }
+static D2D1_COLOR_F ThemeColor(helix::chrome_theme::Rgb c, float a = 1.f) {
+    return D2D1::ColorF(c.r / 255.f, c.g / 255.f, c.b / 255.f, a);
+}
 static constexpr float kMarginX = 32.f;
 static constexpr float kMarginY =  8.f;
 
@@ -155,16 +159,16 @@ bool Renderer::CreateBrushes() {
     };
     return mk({0,0,0,1},             &m_textBrush)
         && mk({.1f,.1f,.8f,1},       &m_linkBrush)
-        && mk({.97f,.97f,.97f,1},    &m_bgBrush)
-        && mk({.7f,.7f,.7f,1},       &m_hrBrush)
+        && mk(ThemeColor(helix::chrome_theme::Panel), &m_bgBrush)
+        && mk(ThemeColor(helix::chrome_theme::Line), &m_hrBrush)
         && mk({.96f,.96f,.96f,1},    &m_codeBgBrush)
         && mk({1.f,.949f,.463f,1},   &m_findBrush)
         && mk({.8f,.8f,.8f,1},       &m_quoteBrush)
-        && mk({.91f,.91f,.91f,1},    &m_tabBgBrush)
-        && mk({1,1,1,1},             &m_tabActBrush)
-        && mk({.82f,.82f,.82f,1},    &m_tabInaBrush)
-        && mk({.2f,.2f,.2f,1},       &m_tabTxtBrush)
-        && mk({.53f,.53f,.53f,1},    &m_tabClsBrush);
+        && mk(ThemeColor(helix::chrome_theme::Rail), &m_tabBgBrush)
+        && mk(ThemeColor(helix::chrome_theme::Active), &m_tabActBrush)
+        && mk(ThemeColor(helix::chrome_theme::Panel), &m_tabInaBrush)
+        && mk(ThemeColor(helix::chrome_theme::Ink), &m_tabTxtBrush)
+        && mk(ThemeColor(helix::chrome_theme::Quiet), &m_tabClsBrush);
 }
 
 void Renderer::ReleaseBrushes() {
@@ -279,48 +283,68 @@ void Renderer::DrawTabStrip(const std::vector<TabEntry>& tabs, float h) {
     m_tabHits.clear();
 
     float w      = (float)m_width;
-    float newBtnW= h;
-    float avail  = w - newBtnW - 4.f;
+    float newBtnW= h - 8.f;
+    float railPad= 6.f;
+    float avail  = w - newBtnW - railPad * 3.f;
     int   n      = (int)tabs.size();
-    float tabW   = std::min(200.f, std::max(80.f, avail / (float)n));
-    float tabH   = h - 2.f;
-    float closeW = 18.f, pad = 8.f;
-    float x      = 0;
+    float tabW   = std::min(210.f, std::max(92.f, avail / (float)n));
+    float tabH   = h - 7.f;
+    float closeW = 20.f, pad = 12.f;
+    float x      = railPad;
+    auto accent = TempBrush(ThemeColor(helix::chrome_theme::Accent));
+    auto inactiveText = TempBrush(ThemeColor(helix::chrome_theme::Quiet));
+    auto plusStroke = TempBrush(ThemeColor(helix::chrome_theme::Line));
 
     m_rt->FillRectangle(D2D1::RectF(0, 0, w, h), m_tabBgBrush);
 
     for (int i = 0; i < n; i++) {
         const auto& t = tabs[i];
         auto* fill = t.active ? m_tabActBrush : m_tabInaBrush;
-        m_rt->FillRectangle(D2D1::RectF(x + 1.f, 0, x + tabW - 1.f, tabH), fill);
-        if (t.active)
-            m_rt->DrawRectangle(D2D1::RectF(x + 1.f, 0, x + tabW - 1.f, tabH), m_hrBrush, 0.5f);
-
-        float textW = tabW - pad * 2 - closeW;
-        if (textW > 10.f && m_fmtTab) {
-            std::wstring title = t.loading ? L"Loading…" : t.title;
-            if (title.empty()) title = L"New Tab";
-            m_rt->DrawText(title.c_str(), (UINT32)title.size(), m_fmtTab,
-                D2D1::RectF(x + pad, 0, x + pad + textW, tabH),
-                m_tabTxtBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        D2D1_ROUNDED_RECT tabRect = D2D1::RoundedRect(
+            D2D1::RectF(x, 5.f, x + tabW - 4.f, 5.f + tabH), 7.f, 7.f);
+        m_rt->FillRoundedRectangle(tabRect, fill);
+        if (t.active) {
+            m_rt->DrawRoundedRectangle(tabRect, m_hrBrush, 1.f);
+            if (accent)
+                m_rt->FillRectangle(D2D1::RectF(x + 10.f, 5.f, x + tabW - 18.f, 8.f), accent);
         }
 
-        float cx = x + tabW - closeW, cy = (tabH - 14.f) / 2.f;
+        if (t.loading && accent) {
+            float dot = x + 10.f;
+            m_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dot, 5.f + tabH * 0.5f), 3.f, 3.f), accent);
+        }
+
+        float textX = x + pad + (t.loading ? 10.f : 0.f);
+        float textW = tabW - pad * 2 - closeW - (t.loading ? 10.f : 0.f);
+        if (textW > 10.f && m_fmtTab) {
+            std::wstring title = t.loading ? L"Loading..." : t.title;
+            if (title.empty()) title = L"New Tab";
+            m_rt->DrawText(title.c_str(), (UINT32)title.size(), m_fmtTab,
+                D2D1::RectF(textX, 5.f, textX + textW, 5.f + tabH),
+                t.active ? m_tabTxtBrush : inactiveText, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+
+        float cx = x + tabW - closeW - 7.f, cy = 5.f + (tabH - 18.f) / 2.f;
         IDWriteTextFormat* closeFormat = m_fmtTabClose ? m_fmtTabClose : m_fmtTab;
         if (closeFormat)
-            m_rt->DrawText(L"\x00D7", 1, closeFormat, D2D1::RectF(cx, 0, cx + closeW, tabH), m_tabClsBrush);
+            m_rt->DrawText(L"\x00D7", 1, closeFormat, D2D1::RectF(cx, cy - 2.f, cx + closeW, cy + 18.f), m_tabClsBrush);
 
-        m_tabHits.push_back({ x, 0, tabW, tabH, i, false });
-        m_tabHits.push_back({ cx, cy, closeW, 14.f, i, true });
+        m_tabHits.push_back({ x, 5.f, tabW - 4.f, tabH, i, false });
+        m_tabHits.push_back({ cx, cy, closeW, 18.f, i, true });
         x += tabW;
     }
 
-    float nx = avail + 4.f;
-    m_rt->FillRectangle(D2D1::RectF(nx, 2.f, nx + newBtnW - 2.f, tabH - 2.f), m_tabInaBrush);
+    float nx = x + railPad;
+    D2D1_ROUNDED_RECT newRect = D2D1::RoundedRect(
+        D2D1::RectF(nx, 6.f, nx + newBtnW, 6.f + newBtnW),
+        (float)helix::chrome_theme::CornerRadius,
+        (float)helix::chrome_theme::CornerRadius);
+    m_rt->FillRoundedRectangle(newRect, m_tabInaBrush);
+    if (plusStroke) m_rt->DrawRoundedRectangle(newRect, plusStroke, 1.f);
     IDWriteTextFormat* plusFormat = m_fmtTabPlus ? m_fmtTabPlus : m_fmtTab;
     if (plusFormat)
-        m_rt->DrawText(L"+", 1, plusFormat, D2D1::RectF(nx, 0, nx + newBtnW, tabH), m_tabTxtBrush);
-    m_tabHits.push_back({ nx, 0, newBtnW, tabH, -1, false });
+        m_rt->DrawText(L"+", 1, plusFormat, D2D1::RectF(nx, 5.f, nx + newBtnW, 6.f + newBtnW), m_tabTxtBrush);
+    m_tabHits.push_back({ nx, 6.f, newBtnW, newBtnW, -1, false });
 
     m_rt->DrawLine(D2D1::Point2F(0, h - 1.f), D2D1::Point2F(w, h - 1.f), m_hrBrush, 1.f);
 }
@@ -461,8 +485,13 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
     m_rt->Clear(bgF);
 
     // Chrome area (toolbar + tab strip)
-    if (topInset > 0)
+    if (topInset > 0) {
         m_rt->FillRectangle(D2D1::RectF(0, 0, (float)m_width, topInset), m_bgBrush);
+        if (tabStripH > 0) {
+            m_rt->FillRectangle(D2D1::RectF(0, 0, (float)m_width, tabStripH), m_tabBgBrush);
+            m_rt->DrawLine(D2D1::Point2F(0, topInset - 1.f), D2D1::Point2F((float)m_width, topInset - 1.f), m_hrBrush, 1.f);
+        }
+    }
 
     if (tabs && !tabs->empty() && tabStripH > 0)
         DrawTabStrip(*tabs, tabStripH);

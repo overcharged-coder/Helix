@@ -8,6 +8,7 @@
 #include <gtk/gtk.h>
 #include "platform/platform.h"
 #include "platform/chrome.h"
+#include "platform/chrome_theme.h"
 #include "platform/box_painter.h"
 #include "platform/plat_text_measure.h"
 #include "render/svg.h"
@@ -17,6 +18,8 @@
 #include "css/stylesheet.h"
 #include "js/dom_bridge.h"
 #include <cctype>
+#include <string>
+#include <vector>
 
 // ── globals ──────────────────────────────────────────────────────────────────
 
@@ -42,6 +45,73 @@ static std::set<std::string> g_failedImages;
 static std::map<std::string, PlatFont> g_fontCache;
 
 static Tab& CurTab() { return g_tabs[g_activeTab]; }
+
+static std::string CssRgb(helix::chrome_theme::Rgb c) {
+    return "rgb(" + std::to_string(c.r) + ", " + std::to_string(c.g) + ", " + std::to_string(c.b) + ")";
+}
+
+static void AddStyleClass(GtkWidget* widget, const char* className) {
+    if (!widget) return;
+    gtk_style_context_add_class(gtk_widget_get_style_context(widget), className);
+}
+
+static void ApplyChromeTheme(
+    GtkWidget* window,
+    GtkWidget* toolbar,
+    GtkWidget* status,
+    GtkWidget* urlEntry,
+    const std::vector<GtkWidget*>& buttons) {
+    using namespace helix::chrome_theme;
+    AddStyleClass(toolbar, "helix-toolbar");
+    AddStyleClass(status, "helix-status");
+    AddStyleClass(urlEntry, "helix-url");
+    for (GtkWidget* button : buttons) {
+        AddStyleClass(button, "helix-command");
+        gtk_widget_set_size_request(button, ButtonWidth, ButtonHeight);
+    }
+    gtk_widget_set_size_request(status, -1, StatusHeight);
+
+    GtkCssProvider* provider = gtk_css_provider_new();
+    std::string css =
+        ".helix-toolbar {"
+        " background: " + CssRgb(Panel) + ";"
+        " padding: " + std::to_string(Margin) + "px;"
+        "}"
+        ".helix-command {"
+        " min-width: " + std::to_string(ButtonWidth) + "px;"
+        " min-height: " + std::to_string(ButtonHeight) + "px;"
+        " padding: 0 8px;"
+        " border-radius: " + std::to_string(CornerRadius) + "px;"
+        " border: 1px solid " + CssRgb(Line) + ";"
+        " background: " + CssRgb(Active) + ";"
+        " color: " + CssRgb(Ink) + ";"
+        " font-weight: 600;"
+        "}"
+        ".helix-command:disabled { color: " + CssRgb(Quiet) + "; }"
+        ".helix-command:hover { border-color: " + CssRgb(Accent) + "; }"
+        ".helix-url {"
+        " min-height: " + std::to_string(ButtonHeight) + "px;"
+        " padding: 0 10px;"
+        " border-radius: " + std::to_string(CornerRadius) + "px;"
+        " border: 1px solid " + CssRgb(Line) + ";"
+        " background: " + CssRgb(Active) + ";"
+        " color: " + CssRgb(Ink) + ";"
+        " font-size: 14px;"
+        "}"
+        ".helix-url:focus { border-color: " + CssRgb(Accent) + "; }"
+        ".helix-status {"
+        " background: " + CssRgb(Rail) + ";"
+        " color: " + CssRgb(Quiet) + ";"
+        " padding: 3px " + std::to_string(Margin) + "px;"
+        " font-size: 11px;"
+        "}";
+    gtk_css_provider_load_from_data(provider, css.c_str(), -1, nullptr);
+    gtk_style_context_add_provider_for_screen(
+        gtk_widget_get_screen(window),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+}
 
 // ── image loading pipeline ───────────────────────────────────────────────────
 
@@ -363,11 +433,11 @@ int main(int argc, char* argv[]) {
     gtk_container_add(GTK_CONTAINER(g_window), vbox);
 
     // Toolbar
-    GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_set_margin_start(toolbar, 4);
-    gtk_widget_set_margin_end(toolbar, 4);
-    gtk_widget_set_margin_top(toolbar, 4);
-    gtk_widget_set_margin_bottom(toolbar, 4);
+    GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, helix::chrome_theme::Gap);
+    gtk_widget_set_margin_start(toolbar, 0);
+    gtk_widget_set_margin_end(toolbar, 0);
+    gtk_widget_set_margin_top(toolbar, 0);
+    gtk_widget_set_margin_bottom(toolbar, 0);
 
     GtkWidget* backBtn   = gtk_button_new_with_label("←");
     GtkWidget* fwdBtn    = gtk_button_new_with_label("→");
@@ -377,6 +447,7 @@ int main(int argc, char* argv[]) {
     g_signal_connect(fwdBtn,    "clicked", G_CALLBACK(on_forward), NULL);
     g_signal_connect(reloadBtn, "clicked", G_CALLBACK(on_reload), NULL);
     g_signal_connect(homeBtn,   "clicked", G_CALLBACK(on_home), NULL);
+    std::vector<GtkWidget*> chromeButtons = { backBtn, fwdBtn, reloadBtn, homeBtn };
 
     g_urlEntry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(g_urlEntry), "Enter URL or search...");
@@ -407,7 +478,8 @@ int main(int argc, char* argv[]) {
     // Status bar
     g_statusLabel = gtk_label_new("");
     gtk_label_set_xalign(GTK_LABEL(g_statusLabel), 0);
-    gtk_widget_set_margin_start(g_statusLabel, 8);
+    gtk_widget_set_margin_start(g_statusLabel, 0);
+    ApplyChromeTheme(g_window, toolbar, g_statusLabel, g_urlEntry, chromeButtons);
     gtk_box_pack_start(GTK_BOX(vbox), g_statusLabel, FALSE, FALSE, 0);
 
     // Wire chrome callbacks.

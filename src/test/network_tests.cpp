@@ -75,9 +75,10 @@ TestResult RunNetworkTests() {
     {
         auto root = FindRepoRoot();
         std::string source = ReadTextFile(root / "src/network/fetcher.cpp");
-        const bool hasSession = source.find("SharedInternetSession") != std::string::npos;
-        const bool enablesDecode = source.find("INTERNET_OPTION_HTTP_DECODING") != std::string::npos;
-        const bool resolvesRedirects = source.find("INTERNET_OPTION_URL") != std::string::npos;
+        const bool hasSession = source.find("EnsureCurlInit") != std::string::npos
+            && source.find("curl_easy_init") != std::string::npos;
+        const bool enablesDecode = source.find("CURLOPT_ACCEPT_ENCODING") != std::string::npos;
+        const bool resolvesRedirects = source.find("CURLINFO_EFFECTIVE_URL") != std::string::npos;
         ExpectEqual("network/http-session-decoding-and-final-url",
             std::string(hasSession ? "session " : "no-session ")
                 + (enablesDecode ? "decode " : "no-decode ")

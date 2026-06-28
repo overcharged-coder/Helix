@@ -1,5 +1,6 @@
 Doctype
-StartTag name=p attr.title="Fish &amp; Chips"
+Comment data=" ignored "
+StartTag name=p attr.title="Fish & Chips"
 Text data="Hi"
 EndTag name=p
 StartTag name=p

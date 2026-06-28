@@ -21,6 +21,7 @@ static std::string TokenTypeName(TokenType type) {
     case TokenType::StartTag: return "StartTag";
     case TokenType::EndTag: return "EndTag";
     case TokenType::Text: return "Text";
+    case TokenType::Comment: return "Comment";
     case TokenType::Doctype: return "Doctype";
     case TokenType::EOF_: return "EOF";
     }

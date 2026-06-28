@@ -14,6 +14,7 @@
 #include "platform/form_state.h"
 #include "platform/updater.h"
 #include "platform/chrome.h"
+#include "platform/chrome_theme.h"
 #include "platform/box_painter.h"
 #include "js/engine.h"
 #include "js/dom_bridge.h"
@@ -58,17 +59,37 @@ static auto& g_updater   = g_chrome.state.updater;
 static auto& g_js        = g_chrome.state.js;
 
 static HCURSOR  g_cursorArrow, g_cursorHand;
+static HFONT    g_uiFont = nullptr;
+static HFONT    g_urlFont = nullptr;
+static HBRUSH   g_toolbarBrush = nullptr;
+static HBRUSH   g_statusBrush = nullptr;
+static HBRUSH   g_editBrush = nullptr;
+static HBRUSH   g_windowBrush = nullptr;
+
+static constexpr COLORREF ToColorRef(helix::chrome_theme::Rgb c) {
+    return RGB(c.r, c.g, c.b);
+}
+
+static constexpr COLORREF kChromeInk     = ToColorRef(helix::chrome_theme::Ink);
+static constexpr COLORREF kChromePanel   = ToColorRef(helix::chrome_theme::Panel);
+static constexpr COLORREF kChromeRail    = ToColorRef(helix::chrome_theme::Rail);
+static constexpr COLORREF kChromeActive  = ToColorRef(helix::chrome_theme::Active);
+static constexpr COLORREF kChromeAccent  = ToColorRef(helix::chrome_theme::Accent);
+static constexpr COLORREF kChromeQuiet   = ToColorRef(helix::chrome_theme::Quiet);
+static constexpr COLORREF kChromeLine    = ToColorRef(helix::chrome_theme::Line);
 
 // ─── layout constants ─────────────────────────────────────────────────────────
 // Layout constants from ChromeLayout (shared with chrome.h).
-constexpr int TAB_H     = 36;
-constexpr int TOOLBAR_H = 44;
-constexpr int STATUS_H  = 22;
+constexpr int TAB_H     = helix::chrome_theme::TabHeight;
+constexpr int TOOLBAR_H = helix::chrome_theme::ToolbarHeight;
+constexpr int STATUS_H  = helix::chrome_theme::StatusHeight;
 constexpr int FIND_H    = 34;   // find bar height
 constexpr int TOP_INSET = TAB_H + TOOLBAR_H;  // total above content
-constexpr int BTN_W     = 38;
-constexpr int BTN_H     = 28;
-constexpr int MARGIN    =  6;
+constexpr int BTN_W     = helix::chrome_theme::ButtonWidth;
+constexpr int BTN_H     = helix::chrome_theme::ButtonHeight;
+constexpr int MARGIN    = helix::chrome_theme::Margin;
+constexpr int GAP       = helix::chrome_theme::Gap;
+constexpr int CORNER_R  = helix::chrome_theme::CornerRadius;
 
 // ─── active tab helpers ───────────────────────────────────────────────────────
 static Tab& CurTab() { return g_tabs[g_activeTab]; }
@@ -325,15 +346,52 @@ static void LayoutControls() {
     int w = rc.right, h = rc.bottom;
     int btnY = TAB_H + (TOOLBAR_H - BTN_H) / 2;
     int x    = MARGIN;
-    SetWindowPos(g_hwndBack, NULL, x,               btnY, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndFwrd, NULL, x + BTN_W,       btnY, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndRefr, NULL, x + BTN_W * 2,   btnY, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndStop, NULL, x + BTN_W * 3,   btnY, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(g_hwndHome, NULL, x + BTN_W * 4,   btnY, BTN_W, BTN_H, SWP_NOZORDER);
-    int urlX = x + BTN_W * 5 + MARGIN;
+    SetWindowPos(g_hwndBack, NULL, x, btnY, BTN_W, BTN_H, SWP_NOZORDER);
+    x += BTN_W + GAP;
+    SetWindowPos(g_hwndFwrd, NULL, x, btnY, BTN_W, BTN_H, SWP_NOZORDER);
+    x += BTN_W + GAP + 4;
+    SetWindowPos(g_hwndRefr, NULL, x, btnY, BTN_W, BTN_H, SWP_NOZORDER);
+    x += BTN_W + GAP;
+    SetWindowPos(g_hwndStop, NULL, x, btnY, BTN_W, BTN_H, SWP_NOZORDER);
+    x += BTN_W + GAP + 4;
+    SetWindowPos(g_hwndHome, NULL, x, btnY, BTN_W, BTN_H, SWP_NOZORDER);
+    int urlX = x + BTN_W + MARGIN + 2;
     SetWindowPos(g_hwndUrl,    NULL, urlX, btnY, w - urlX - MARGIN, BTN_H, SWP_NOZORDER);
     SetWindowPos(g_hwndStatus, NULL, 0, h - STATUS_H, w, STATUS_H, SWP_NOZORDER);
     SetWindowPos(g_hwndFind,   NULL, 0, h - STATUS_H - FIND_H, w, FIND_H, SWP_NOZORDER);
+}
+
+static void DrawChromeButton(const DRAWITEMSTRUCT* dis) {
+    HDC dc = dis->hDC;
+    RECT r = dis->rcItem;
+    bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    bool focus = (dis->itemState & ODS_FOCUS) != 0;
+
+    COLORREF fill = disabled ? RGB(236, 239, 244)
+        : pressed ? RGB(222, 228, 240)
+        : kChromeActive;
+    COLORREF stroke = focus ? kChromeAccent : kChromeLine;
+    COLORREF text = disabled ? RGB(166, 173, 186) : kChromeInk;
+
+    HBRUSH bg = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, focus ? 2 : 1, stroke);
+    HGDIOBJ oldBrush = SelectObject(dc, bg);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, CORNER_R, CORNER_R);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(bg);
+
+    wchar_t label[16] = {};
+    GetWindowTextW(dis->hwndItem, label, 16);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, text);
+    HFONT oldFont = g_uiFont ? (HFONT)SelectObject(dc, g_uiFont) : nullptr;
+    if (pressed) OffsetRect(&r, 0, 1);
+    DrawTextW(dc, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    if (oldFont) SelectObject(dc, oldFont);
 }
 
 // ─── URL bar subclass ─────────────────────────────────────────────────────────
@@ -425,7 +483,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         HINSTANCE hi = GetModuleHandleW(NULL);
         auto btn = [&](LPCWSTR t, int id) {
-            return CreateWindowW(L"BUTTON", t, WS_CHILD | WS_VISIBLE,
+            return CreateWindowW(L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                 0,0,0,0, hwnd, (HMENU)(intptr_t)id, hi, NULL);
         };
         g_hwndBack = btn(L"\x2190", IDC_BACK);
@@ -438,7 +496,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
             0,0,0,0, hwnd, (HMENU)IDC_URL, hi, NULL);
         g_hwndStatus = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_SUNKEN,
+            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_LEFTNOWORDWRAP,
             0,0,0,0, hwnd, NULL, hi, NULL);
 
         g_hwndFind = CreateWindowW(L"EDIT", L"",
@@ -448,6 +506,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(g_hwndStop, FALSE);
         SetWindowSubclass(g_hwndUrl,  UrlProc,  1, 0);
         SetWindowSubclass(g_hwndFind, FindProc, 2, 0);
+
+        g_uiFont = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        g_urlFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        g_toolbarBrush = CreateSolidBrush(kChromePanel);
+        g_statusBrush = CreateSolidBrush(kChromeRail);
+        g_editBrush = CreateSolidBrush(kChromeActive);
+        SendMessageW(g_hwndUrl, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(10, 10));
+        SendMessageW(g_hwndFind, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(10, 10));
+        if (g_uiFont) {
+            SendMessageW(g_hwndBack, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+            SendMessageW(g_hwndFwrd, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+            SendMessageW(g_hwndRefr, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+            SendMessageW(g_hwndStop, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+            SendMessageW(g_hwndHome, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+            SendMessageW(g_hwndStatus, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        }
+        if (g_urlFont) {
+            SendMessageW(g_hwndUrl, WM_SETFONT, (WPARAM)g_urlFont, TRUE);
+            SendMessageW(g_hwndFind, WM_SETFONT, (WPARAM)g_urlFont, TRUE);
+        }
 
         g_renderer.SetImageRequestCallback([hwnd](std::string url) {
             std::thread([hwnd, url]() {
@@ -512,6 +594,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         if (repaintForFragment) InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    }
+
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        if (dis && dis->CtlType == ODT_BUTTON) {
+            DrawChromeButton(dis);
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_CTLCOLORBTN: {
+        HDC dc = (HDC)wp;
+        SetBkColor(dc, kChromePanel);
+        return (LRESULT)g_toolbarBrush;
+    }
+
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp;
+        SetTextColor(dc, kChromeInk);
+        SetBkColor(dc, kChromeActive);
+        return (LRESULT)g_editBrush;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        SetTextColor(dc, kChromeQuiet);
+        SetBkColor(dc, kChromeRail);
+        return (LRESULT)g_statusBrush;
     }
 
     case WM_PAGE_READY: {
@@ -850,6 +961,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
 
     case WM_DESTROY:
+        if (g_uiFont) { DeleteObject(g_uiFont); g_uiFont = nullptr; }
+        if (g_urlFont) { DeleteObject(g_urlFont); g_urlFont = nullptr; }
+        if (g_toolbarBrush) { DeleteObject(g_toolbarBrush); g_toolbarBrush = nullptr; }
+        if (g_statusBrush) { DeleteObject(g_statusBrush); g_statusBrush = nullptr; }
+        if (g_editBrush) { DeleteObject(g_editBrush); g_editBrush = nullptr; }
+        if (g_windowBrush) { DeleteObject(g_windowBrush); g_windowBrush = nullptr; }
         PostQuitMessage(0);
         return 0;
     }
@@ -920,7 +1037,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     wc.hInstance     = hInst;
     wc.lpszClassName = L"HelixBrowser";
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    g_windowBrush = CreateSolidBrush(kChromePanel);
+    wc.hbrBackground = g_windowBrush;
     wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
