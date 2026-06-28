@@ -1336,10 +1336,31 @@ static void ApplyDeclaration(const std::string& prop,
     } else if (prop == "cursor" || prop == "pointer-events" || prop == "user-select"
             || prop == "-webkit-user-select" || prop == "-moz-user-select") {
         // Interaction properties — parsed but no visual effect.
-    } else if (prop == "transition" || prop == "transition-property"
-            || prop == "transition-duration" || prop == "transition-timing-function"
-            || prop == "transition-delay") {
-        // Animation properties — parsed but no visual effect yet.
+    } else if (prop == "transition") {
+        // Shorthand: property duration timing-function delay
+        // Simplified: extract duration (first value with s/ms) and property name.
+        std::istringstream tss(val); std::string tok;
+        out.transitionProperty = "all";
+        while (tss >> tok) {
+            std::string tl = sLower(tok);
+            if (tl.find('s') != std::string::npos && (std::isdigit((unsigned char)tl[0]) || tl[0] == '.')) {
+                float dur = 0;
+                try { dur = std::stof(tl); } catch (...) {}
+                if (tl.find("ms") != std::string::npos) dur /= 1000.f;
+                out.transitionDuration = dur;
+            } else if (tl != "ease" && tl != "linear" && tl != "ease-in" && tl != "ease-out" && tl != "ease-in-out" && tl.find("cubic") == std::string::npos) {
+                out.transitionProperty = tl;
+            }
+        }
+        out.transitionSet = true;
+    } else if (prop == "transition-duration") {
+        std::string v = sLower(sTrim(val));
+        float dur = 0; try { dur = std::stof(v); } catch (...) {}
+        if (v.find("ms") != std::string::npos) dur /= 1000.f;
+        out.transitionDuration = dur; out.transitionSet = true;
+    } else if (prop == "transition-property") {
+        out.transitionProperty = sLower(sTrim(val)); out.transitionSet = true;
+    } else if (prop == "transition-timing-function" || prop == "transition-delay") {
     } else if (prop == "animation" || prop == "animation-name" || prop == "animation-duration"
             || prop == "animation-timing-function" || prop == "animation-delay"
             || prop == "animation-iteration-count" || prop == "animation-direction"

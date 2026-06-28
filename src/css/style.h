@@ -93,6 +93,10 @@ struct ComputedStyle {
     bool     columnCountSet  = false;
     float    aspectRatio     = 0;    // width/height ratio (0=auto)
     bool     aspectRatioSet  = false;
+    // transition
+    float    transitionDuration = 0; // seconds
+    std::string transitionProperty; // "all", "opacity", "color", etc.
+    bool     transitionSet   = false;
     // outline
     float    outlineWidth    = 0;
     CssColor outlineColor;
@@ -294,6 +298,7 @@ struct ComputedStyle {
         if (child.textOverflowSet) { out.textOverflow = child.textOverflow; out.textOverflowSet = true; }
         if (child.columnCountSet) { out.columnCount = child.columnCount; out.columnGap = child.columnGap; out.columnCountSet = true; }
         if (child.aspectRatioSet) { out.aspectRatio = child.aspectRatio; out.aspectRatioSet = true; }
+        if (child.transitionSet) { out.transitionDuration = child.transitionDuration; out.transitionProperty = child.transitionProperty; out.transitionSet = true; }
         if (child.outlineSet) { out.outlineWidth = child.outlineWidth; out.outlineColor = child.outlineColor; out.outlineSet = true; }
         if (child.textShadowSet) { out.textShadowX = child.textShadowX; out.textShadowY = child.textShadowY; out.textShadowBlur = child.textShadowBlur; out.textShadowColor = child.textShadowColor; out.textShadowSet = true; }
         if (child.width        >= 0) out.width     = child.width;
