@@ -290,9 +290,19 @@ void Renderer::DrawTabStrip(const std::vector<TabEntry>& tabs, float h) {
         }
 
         float cx = x + tabW - closeW, cy = (tabH - 14.f) / 2.f;
-        if (m_fmtTab)
-            m_rt->DrawText(L"×", 1, m_fmtTab,
-                D2D1::RectF(cx, 0, cx + closeW, tabH), m_tabClsBrush);
+        if (m_fmtTab) {
+            IDWriteTextFormat* closeFmt = nullptr;
+            m_dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.f, L"en-us", &closeFmt);
+            if (closeFmt) {
+                closeFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                closeFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                m_rt->DrawText(L"\x00D7", 1, closeFmt, D2D1::RectF(cx, 0, cx + closeW, tabH), m_tabClsBrush);
+                closeFmt->Release();
+            } else {
+                m_rt->DrawText(L"\x00D7", 1, m_fmtTab, D2D1::RectF(cx, 0, cx + closeW, tabH), m_tabClsBrush);
+            }
+        }
 
         m_tabHits.push_back({ x, 0, tabW, tabH, i, false });
         m_tabHits.push_back({ cx, cy, closeW, 14.f, i, true });
@@ -301,8 +311,20 @@ void Renderer::DrawTabStrip(const std::vector<TabEntry>& tabs, float h) {
 
     float nx = avail + 4.f;
     m_rt->FillRectangle(D2D1::RectF(nx, 2.f, nx + newBtnW - 2.f, tabH - 2.f), m_tabInaBrush);
-    if (m_fmtTab)
-        m_rt->DrawText(L"+", 1, m_fmtTab, D2D1::RectF(nx, 0, nx + newBtnW, tabH), m_tabTxtBrush);
+    if (m_fmtTab) {
+        // Center the "+" both horizontally and vertically.
+        IDWriteTextFormat* centered = nullptr;
+        m_dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.f, L"en-us", &centered);
+        if (centered) {
+            centered->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            centered->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            m_rt->DrawText(L"+", 1, centered, D2D1::RectF(nx, 0, nx + newBtnW, tabH), m_tabTxtBrush);
+            centered->Release();
+        } else {
+            m_rt->DrawText(L"+", 1, m_fmtTab, D2D1::RectF(nx, 0, nx + newBtnW, tabH), m_tabTxtBrush);
+        }
+    }
     m_tabHits.push_back({ nx, 0, newBtnW, tabH, -1, false });
 
     m_rt->DrawLine(D2D1::Point2F(0, h - 1.f), D2D1::Point2F(w, h - 1.f), m_hrBrush, 1.f);
