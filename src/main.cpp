@@ -659,7 +659,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         HINSTANCE hi = GetModuleHandleW(NULL);
         auto btn = [&](LPCWSTR t, int id) {
-            return CreateWindowW(L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            return CreateWindowW(L"BUTTON", t,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
                 0,0,0,0, hwnd, (HMENU)(intptr_t)id, hi, NULL);
         };
         g_hwndBack = btn(L"\x2190", IDC_BACK);
@@ -674,17 +675,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowSubclass(g_hwndHome, ChromeButtonProc, 15, 0);
 
         g_hwndUrlBadge = CreateWindowW(L"STATIC", L"H",
-            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_CENTER | SS_CENTERIMAGE,
             0,0,0,0, hwnd, NULL, hi, NULL);
         g_hwndUrl = CreateWindowW(L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
             0,0,0,0, hwnd, (HMENU)IDC_URL, hi, NULL);
         g_hwndStatus = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_LEFTNOWORDWRAP | SS_CENTERIMAGE,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT | SS_LEFTNOWORDWRAP | SS_CENTERIMAGE,
             0,0,0,0, hwnd, NULL, hi, NULL);
 
         g_hwndFind = CreateWindowW(L"EDIT", L"",
-            WS_CHILD | ES_AUTOHSCROLL,
+            WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
             0,0,0,0, hwnd, (HMENU)IDC_FIND, hi, NULL);
 
         EnableWindow(g_hwndStop, FALSE);
@@ -1249,7 +1250,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
     g_hwnd = CreateWindowExW(0,
         L"HelixBrowser", L"Helix",
-        WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+        WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 900,
         NULL, NULL, hInst, NULL);
 
