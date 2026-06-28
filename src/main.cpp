@@ -9,8 +9,6 @@
 #include "html/parser.h"
 #include "html/resources.h"
 #include "network/text_decode.h"
-// browser_core.h not included here — main.cpp has its own Tab/Page/Semaphore types.
-// LoadExternalStylesheets is duplicated locally with Windows-specific behavior.
 #include "layout/scroll.h"
 #include "render/renderer.h"
 #include "platform/form_state.h"
@@ -29,7 +27,6 @@
 #include <mutex>
 #include <condition_variable>
 
-// Semaphore, Page, Tab, ImageMsg, PageMsg come from browser_core.h via chrome.h.
 static Semaphore g_imageFetchGate(6);
 
 // ─── control IDs ─────────────────────────────────────────────────────────────
@@ -47,17 +44,17 @@ static HWND     g_hwndStatus;
 static HWND     g_hwndFind;
 static bool     g_findVisible = false;
 static Renderer g_renderer;
-static FormState g_formState;
-static Updater g_updater;
 const Node* g_hoverNode = nullptr;
 std::map<const Node*, float> g_elementScrollY;
 static std::vector<ScrollableRegion> g_scrollables;
-static JsEngine g_js;
 
+// BrowserChrome owns tabs, form state, JS engine, updater.
 static BrowserChrome g_chrome;
-// Legacy aliases — gradually migrate to g_chrome.state.tabs/activeTab.
-#define g_tabs     g_chrome.state.tabs
-#define g_activeTab g_chrome.state.activeTab
+static auto& g_tabs      = g_chrome.state.tabs;
+static auto& g_activeTab = g_chrome.state.activeTab;
+static auto& g_formState = g_chrome.state.form;
+static auto& g_updater   = g_chrome.state.updater;
+static auto& g_js        = g_chrome.state.js;
 
 static HCURSOR  g_cursorArrow, g_cursorHand;
 
@@ -108,9 +105,6 @@ static void UpdateTitle() {
     if (t.empty()) t = L"New Tab";
     SetWindowTextW(g_hwnd, (t + L" \x2014 Helix").c_str());
 }
-
-// LowerAscii, AttrContainsToken, StylesheetMediaApplies, FindFirstElement,
-// LoadExternalStylesheets now come from browser_core.h via chrome.h.
 
 // ─── scrollbar ───────────────────────────────────────────────────────────────
 static int ViewportH() {
