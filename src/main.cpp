@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <shlobj.h>
 #pragma comment(lib, "comctl32.lib")
 
 #include "network/fetcher.h"
@@ -749,6 +750,93 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             std::string href = g_renderer.HitTest((float)px, (float)py);
             if (!href.empty()) Navigate(href);
+        }
+        return 0;
+    }
+
+    case WM_RBUTTONUP: {
+        int px = (int)(short)LOWORD(lp);
+        int py = (int)(short)HIWORD(lp);
+        if (py >= TOP_INSET) {
+            std::string href = g_renderer.HitTest((float)px, (float)py);
+            HMENU menu = CreatePopupMenu();
+            if (!href.empty()) {
+                AppendMenuW(menu, MF_STRING, 9001, L"Open Link");
+                AppendMenuW(menu, MF_STRING, 9002, L"Open Link in New Tab");
+                AppendMenuW(menu, MF_STRING, 9003, L"Copy Link");
+                AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+            }
+            AppendMenuW(menu, MF_STRING, 9010, L"Back");
+            AppendMenuW(menu, MF_STRING, 9011, L"Forward");
+            AppendMenuW(menu, MF_STRING, 9012, L"Reload");
+            AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(menu, MF_STRING, 9020, L"Add Bookmark");
+            AppendMenuW(menu, MF_STRING, 9021, L"View Bookmarks");
+            POINT pt = {px, py};
+            ClientToScreen(hwnd, &pt);
+            int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(menu);
+            switch (cmd) {
+                case 9001: Navigate(href); break;
+                case 9002: NewTab(href); break;
+                case 9003: {
+                    if (OpenClipboard(hwnd)) {
+                        EmptyClipboard();
+                        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, href.size() + 1);
+                        if (h) { memcpy(GlobalLock(h), href.c_str(), href.size() + 1); GlobalUnlock(h);
+                            SetClipboardData(CF_TEXT, h); }
+                        CloseClipboard();
+                    }
+                    break;
+                }
+                case 9010: GoBack(); break;
+                case 9011: GoForward(); break;
+                case 9012: if (!CurTab().loading) Navigate(CurTab().url, false); break;
+                case 9020: {
+                    // Add current page to bookmarks file.
+                    std::string bmPath;
+                    char appdata[MAX_PATH]; if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK)
+                        bmPath = std::string(appdata) + "\\Helix\\bookmarks.txt";
+                    if (!bmPath.empty()) {
+                        CreateDirectoryA((std::string(appdata) + "\\Helix").c_str(), NULL);
+                        FILE* f = fopen(bmPath.c_str(), "a");
+                        if (f) { fprintf(f, "%s|%s\n", CurTab().url.c_str(), CurTab().title.c_str()); fclose(f); }
+                    }
+                    break;
+                }
+                case 9021: {
+                    // Load bookmarks as a simple page.
+                    std::string bmPath;
+                    char appdata[MAX_PATH]; if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK)
+                        bmPath = std::string(appdata) + "\\Helix\\bookmarks.txt";
+                    std::string html = "<html><head><title>Bookmarks</title></head><body><h1>Bookmarks</h1><ul>";
+                    if (!bmPath.empty()) {
+                        FILE* f = fopen(bmPath.c_str(), "r");
+                        if (f) {
+                            char line[4096];
+                            while (fgets(line, sizeof(line), f)) {
+                                std::string l(line); while (!l.empty() && (l.back()=='\n'||l.back()=='\r')) l.pop_back();
+                                size_t pipe = l.find('|');
+                                std::string url = pipe != std::string::npos ? l.substr(0, pipe) : l;
+                                std::string title = pipe != std::string::npos ? l.substr(pipe + 1) : url;
+                                html += "<li><a href=\"" + url + "\">" + title + "</a></li>";
+                            }
+                            fclose(f);
+                        }
+                    }
+                    html += "</ul></body></html>";
+                    Tab& tab = CurTab();
+                    tab.page = std::make_shared<Page>();
+                    tab.page->url = "helix://bookmarks";
+                    tab.page->dom = ParseHtml(html);
+                    tab.title = "Bookmarks";
+                    tab.url = "helix://bookmarks";
+                    g_renderer.InvalidateLayout();
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    UpdateTitle();
+                    break;
+                }
+            }
         }
         return 0;
     }

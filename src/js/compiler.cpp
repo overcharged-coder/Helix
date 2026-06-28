@@ -841,8 +841,13 @@ uint8_t Compiler::compileObject(const ObjectExpr& e, int hint) {
             freeReg(r);freeReg(a2);freeReg(a1);freeReg(assignFn);freeReg(objAssign);freeReg(spread);
             continue;
         }
-        uint8_t val = p.isMethod ? compileFuncExpr(p.value->as<FuncExpr>(), -1) : compileExpr(*p.value);
-        if (p.computed) {
+        uint8_t val = (p.isMethod || p.isGet || p.isSet) ? compileFuncExpr(p.value->as<FuncExpr>(), -1) : compileExpr(*p.value);
+        if (p.isGet || p.isSet) {
+            // Getter/setter: store as __get_key__ / __set_key__ for the VM to intercept.
+            auto& lit = p.key->as<LiteralExpr>();
+            std::string internalKey = (p.isGet ? "__get_" : "__set_") + lit.strVal + "__";
+            emitSetStaticProp(dst, internalKey, val, p.key->line);
+        } else if (p.computed) {
             uint8_t key = compileExpr(*p.key);
             emit(OP_SET_PROP, dst, key, val); freeReg(key);
         } else {

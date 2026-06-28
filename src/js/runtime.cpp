@@ -84,8 +84,19 @@ static void registerObject(VM& vm) {
         if (ARG(0).isObject() && ARG(2).isObject()) {
             auto* o = ARG(0).asObject();
             auto* desc = ARG(2).asObject();
-            JsValue val = desc->getProp("value");
-            if (!val.isUndefined()) o->setProp(ARG_STR(1), val);
+            std::string key = ARG_STR(1);
+            JsValue getter = desc->getProp("get");
+            JsValue setter = desc->getProp("set");
+            if (getter.isCallable() || setter.isCallable()) {
+                // Store getter/setter as special properties __get_<key>__ / __set_<key>__
+                if (getter.isCallable()) o->setProp("__get_" + key + "__", getter);
+                if (setter.isCallable()) o->setProp("__set_" + key + "__", setter);
+                // Set a sentinel so property access knows to call the getter
+                o->setProp(key, JsValue::undefined());
+            } else {
+                JsValue val = desc->getProp("value");
+                if (!val.isUndefined()) o->setProp(key, val);
+            }
         }
         return ARG(0);
     });

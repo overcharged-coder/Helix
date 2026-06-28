@@ -58,6 +58,11 @@ JsValue VM::getProp(JsValue obj, const std::string& key) {
             JsValue out;
             if (onDomPropGet(o, key, out)) return out;
         }
+        // Check for getter defined via Object.defineProperty
+        JsValue getter = o->getProp("__get_" + key + "__");
+        if (getter.isCallable()) {
+            try { return call(getter, obj, {}); } catch (...) { return JsValue::undefined(); }
+        }
         // Check own + proto chain via JsObject::getProp
         JsValue v = o->getProp(key);
         if (!v.isUndefined()) return v;
@@ -117,8 +122,13 @@ JsValue VM::getProp(JsValue obj, JsValue key) {
 void VM::setProp(JsValue obj, const std::string& key, JsValue val) {
     if (obj.isObject()) {
         auto* o = obj.asObject();
+        // Check for setter defined via Object.defineProperty.
+        JsValue setter = o->getProp("__set_" + key + "__");
+        if (setter.isCallable()) {
+            try { call(setter, obj, {val}); } catch (...) {}
+            return;
+        }
         o->setProp(key, val);
-        // Reflect live DOM properties (className, id, innerHTML, …) onto the node.
         if (o->domNode && onDomPropSet) onDomPropSet(o, key, val);
     }
 }
