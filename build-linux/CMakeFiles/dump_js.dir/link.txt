@@ -1,1 +1,0 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/dump_js.dir/link.d CMakeFiles/dump_js.dir/tools/dump_js.cpp.o -o dump_js  libhelix_engine.a _deps/curl-build/lib/libcurl.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so

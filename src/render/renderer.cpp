@@ -2,6 +2,7 @@
 #include "layout/layout_engine.h"
 #include "css/stylesheet.h"
 #include "render/webfont.h"
+#include "render/transition.h"
 #include "network/url.h"
 #include "render/svg.h"
 #include "third_party/stb_image.h"
@@ -450,12 +451,24 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
             // Rebuild the layout tree only when something that affects geometry
             // changed; scrolling reuses the cached tree.
             extern const Node* g_hoverNode;
+            static const Node* prevHover = nullptr;
+            bool hoverChanged = (g_hoverNode != prevHover);
+            std::map<const Node*, ComputedStyle> oldStyles;
+            if (hoverChanged && m_layoutRoot) {
+                std::function<void(const LayoutBox&)> collect = [&](const LayoutBox& b) {
+                    if (b.node && oldStyles.find(b.node) == oldStyles.end())
+                        oldStyles.emplace(b.node, b.style);
+                    for (const auto& k : b.kids) collect(*k);
+                };
+                collect(*m_layoutRoot);
+            }
             SetCssHoverNode(g_hoverNode);
             bool reuse = m_layoutRoot
                       && m_layoutDocKey  == doc.get()
                       && m_layoutWKey    == m_width
                       && m_layoutHKey    == m_height
-                      && m_layoutZoomKey == effZoom;
+                      && m_layoutZoomKey == effZoom
+                      && !hoverChanged;
             if (!reuse) {
                 LayoutInput in;
                 in.document  = doc.get();
@@ -473,9 +486,25 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
                 m_anchorY.clear();
                 if (m_layoutRoot) CollectAnchors(*m_layoutRoot);
             }
+            if (hoverChanged && m_layoutRoot && !oldStyles.empty()) {
+                std::set<const Node*> transitioned;
+                std::function<void(const LayoutBox&)> startTransitions = [&](const LayoutBox& b) {
+                    if (b.node && transitioned.insert(b.node).second) {
+                        auto it = oldStyles.find(b.node);
+                        if (it != oldStyles.end())
+                            TransitionManager::instance().onStyleChange(b.node, it->second, b.style);
+                    }
+                    for (const auto& k : b.kids) startTransitions(*k);
+                };
+                startTransitions(*m_layoutRoot);
+            }
+            prevHover = g_hoverNode;
             if (m_layoutRoot) {
                 PaintBox(*m_layoutRoot, scrollY, topInset, false);
                 docH = m_layoutRoot->contentH + 32.f;
+                // If transitions are active, schedule another repaint.
+                if (TransitionManager::instance().hasActiveTransitions() && m_hwnd)
+                    InvalidateRect(m_hwnd, nullptr, FALSE);
             }
         } catch (const std::exception& ex) {
             FILE* f = fopen("C:/tmp/helix_crash.txt", "a");

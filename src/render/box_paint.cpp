@@ -2,6 +2,7 @@
 // and implements the ITextMeasure interface the engine uses for measurement.
 #include "render/renderer.h"
 #include "layout/layout_engine.h"
+#include "render/transition.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -121,7 +122,10 @@ void Renderer::CollectAnchors(const LayoutBox& box) {
 // ─── decorations (background + border + replaced image) ──────────────────────
 
 void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float topInset) {
-    const ComputedStyle& s = box.style;
+    // Apply CSS transition interpolation to the style before painting.
+    ComputedStyle transStyle = box.style;
+    if (box.node) TransitionManager::instance().applyTransition(box.node, transStyle);
+    const ComputedStyle& s = transStyle;
     float sx = box.x;
     float sy = box.y - scrollY + topInset;
     float bw = box.borderBoxW();
@@ -405,7 +409,9 @@ void Renderer::PaintLines(const LayoutBox& box, float scrollY, float topInset, b
                 continue;
             }
             // Text fragment.
-            const ComputedStyle& fs = frag.src->style;
+            ComputedStyle transStyle = frag.src->style;
+            if (frag.src->node) TransitionManager::instance().applyTransition(frag.src->node, transStyle);
+            const ComputedStyle& fs = transStyle;
             if (fs.visibilitySet && fs.visibilityHidden) continue;
             float sy = frag.y - (underFixed ? 0.f : scrollY) + topInset;
             if (sy + frag.h < topInset || sy > (float)m_height) {
