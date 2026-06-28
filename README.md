@@ -33,8 +33,11 @@ native shell on each platform.
   chaining (`?.`), nullish coalescing (`??`), `for...of`, real RegExp via `<regex>`,
   `fetch()`, `getComputedStyle()`, DOM geometry APIs, observer APIs, `addEventListener`
   with event bubbling, and external `<script src>` loading
-- **SVG**: basic renderer for rect, circle, ellipse, line, path (cubic/quadratic bezier),
-  polygon with scanline fill
+- **SVG**: rasterizer for inline and external SVG images. Supports rect/circle/ellipse,
+  line/polyline/polygon, path commands (`M/L/H/V/C/S/Q/T/A/Z`), text/tspan, nested
+  `<svg>`, `<g>`, defs/`<use>`/symbol reuse, linear/radial gradients, viewBox and
+  `preserveAspectRatio`, transforms, CSS class/style rules, opacity, stroke dash arrays,
+  line caps/joins, fill rules, and all CSS named colors
 - **Layout**: block, inline (with line breaking), float, table (auto column sizing),
   flex (row/column, wrap, shrink, basis, align-self, justify-content, gap), grid
   (column tracks), positioned (static/relative/absolute/fixed with % offsets)
