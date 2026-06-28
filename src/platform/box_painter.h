@@ -321,6 +321,10 @@ inline void PaintLines(PaintState& ps, const LayoutBox& box) {
             PlatColor color = fs.color.valid ? ToPlatColor(fs.color)
                             : (!frag.src->href.empty() ? PlatColor{0.1f,0.1f,0.8f,1} : PlatColor{0,0,0,1});
             bool underline = !fs.noUnderline && (fs.underline || !frag.src->href.empty());
+            // text-shadow
+            if (fs.textShadowSet && fs.textShadowColor.valid && fs.textShadowColor.a > 0)
+                ps.r->DrawText(frag.text, frag.x + fs.textShadowX, sy + fs.textShadowY,
+                               frag.w + 4.f, frag.h * 2.f + 4.f, font, ToPlatColor(fs.textShadowColor));
             ps.r->DrawText(frag.text, frag.x, sy, frag.w + 4.f, frag.h * 2.f + 4.f,
                            font, color, underline);
             if (fs.lineThrough) {

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <set>
 #include <sstream>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1275,29 +1276,82 @@ void Engine::layoutGrid(LayoutBox& box, std::vector<LayoutBox*>& positionedOut) 
     { float x = box.contentX();
       for (size_t i = 0; i < cols; ++i) { colX[i] = x; x += colW[i] + gap; } }
 
-    // Place items row by row.
-    float rowY = box.contentY();
-    size_t idx = 0;
-    while (idx < items.size()) {
-        float rowH = 0;
-        for (size_t c = 0; c < cols && idx < items.size(); ++c, ++idx) {
-            LayoutBox& item = *items[idx];
-            // Force item width to the column width.
-            float savedW = item.style.width;
-            float savedPct = item.style.widthPercent;
-            item.style.width = std::max(0.f, colW[c] - hExtra(item.style)) / std::max(0.01f, Z);
-            item.style.widthPercent = -1;
-            item.y = rowY;
-            std::vector<LayoutBox*> pos;
-            layoutBox(item, colX[c], colW[c], usedHeight(box.style, -1.f), pos, nullptr);
-            for (auto* p : pos) positionedOut.push_back(p);
-            item.style.width = savedW;
-            item.style.widthPercent = savedPct;
-            rowH = std::max(rowH, item.marginBoxH());
+    // Resolve row track heights (if grid-template-rows is set).
+    const auto& rowTracks = box.style.gridTemplateRows;
+
+    // Build a grid: assign items to (row, col) cells.
+    // Items with explicit grid-column/grid-row go first; auto items fill gaps.
+    size_t maxRow = 0;
+    struct Cell { int row; int col; int rowSpan; int colSpan; LayoutBox* item; };
+    std::vector<Cell> placed;
+    std::vector<LayoutBox*> autoItems;
+    for (auto* item : items) {
+        int cs = item->style.gridColumnStart, ce = item->style.gridColumnEnd;
+        int rs = item->style.gridRowStart, re = item->style.gridRowEnd;
+        if (cs > 0 || rs > 0) {
+            int c = cs > 0 ? cs - 1 : 0;  // 1-based to 0-based
+            int r = rs > 0 ? rs - 1 : 0;
+            int cspan = (ce > cs) ? ce - cs : 1;
+            int rspan = (re > rs) ? re - rs : 1;
+            placed.push_back({r, c, rspan, cspan, item});
+            maxRow = std::max(maxRow, (size_t)(r + rspan));
+        } else {
+            autoItems.push_back(item);
         }
-        rowY += rowH + gap;
     }
-    box.contentH = std::max(0.f, rowY - gap - box.contentY());
+    // Auto-place remaining items in row-major order, skipping occupied cells.
+    std::set<std::pair<int,int>> occupied;
+    for (auto& p : placed)
+        for (int r = p.row; r < p.row + p.rowSpan; ++r)
+            for (int c = p.col; c < p.col + p.colSpan; ++c)
+                occupied.insert({r, c});
+    int autoRow = 0, autoCol = 0;
+    for (auto* item : autoItems) {
+        while (occupied.count({autoRow, autoCol})) {
+            if (++autoCol >= (int)cols) { autoCol = 0; ++autoRow; }
+        }
+        placed.push_back({autoRow, autoCol, 1, 1, item});
+        occupied.insert({autoRow, autoCol});
+        maxRow = std::max(maxRow, (size_t)(autoRow + 1));
+        if (++autoCol >= (int)cols) { autoCol = 0; ++autoRow; }
+    }
+
+    // Layout each cell and track row heights.
+    size_t numRows = maxRow > 0 ? maxRow : 1;
+    std::vector<float> rowH(numRows, 0.f);
+    for (auto& cell : placed) {
+        LayoutBox& item = *cell.item;
+        int c = std::min(cell.col, (int)cols - 1);
+        float cellW = 0;
+        for (int ci = c; ci < std::min(c + cell.colSpan, (int)cols); ++ci) cellW += colW[ci];
+        if (cell.colSpan > 1) cellW += gap * (cell.colSpan - 1);
+        float savedW = item.style.width, savedPct = item.style.widthPercent;
+        item.style.width = std::max(0.f, cellW - hExtra(item.style)) / std::max(0.01f, Z);
+        item.style.widthPercent = -1;
+        std::vector<LayoutBox*> pos;
+        layoutBox(item, colX[c], cellW, usedHeight(box.style, -1.f), pos, nullptr);
+        for (auto* p : pos) positionedOut.push_back(p);
+        item.style.width = savedW; item.style.widthPercent = savedPct;
+        int r = cell.row;
+        if (r < (int)rowH.size()) rowH[r] = std::max(rowH[r], item.marginBoxH());
+    }
+
+    // Compute row Y positions.
+    std::vector<float> rowY(numRows);
+    float y = box.contentY();
+    for (size_t r = 0; r < numRows; ++r) { rowY[r] = y; y += rowH[r] + gap; }
+
+    // Position each item at its (row, col).
+    for (auto& cell : placed) {
+        LayoutBox& item = *cell.item;
+        int c = std::min(cell.col, (int)cols - 1);
+        int r = std::min(cell.row, (int)numRows - 1);
+        float targetX = colX[c] + item.marginLeft;
+        float targetY = rowY[r] + item.marginTop;
+        TranslateSubtree(item, targetX - item.x, targetY - item.y);
+    }
+
+    box.contentH = std::max(0.f, y - gap - box.contentY());
 }
 
 // A real fixed-grid auto table layout: column widths are SHARED across rows
@@ -1555,6 +1609,21 @@ float Engine::layoutInline(LayoutBox& box, FloatCtx* fctx) {
                 adv = it.width;
             }
             if (any && !nowrap && (lineWidth + adv) > avail && it.type != InlineItem::Space) {
+                // word-break: break-all/break-word — split the word if it alone exceeds avail.
+                if (!any && box.style.wordBreak >= 1 && it.type == InlineItem::Word && it.text.size() > 1) {
+                    // Character-level break: find how many chars fit.
+                    float charW = it.width / (float)it.text.size();
+                    int fitChars = std::max(1, (int)((avail - lineWidth) / charW));
+                    if (fitChars < (int)it.text.size()) {
+                        // Split: first part goes on this line, rest becomes a new item.
+                        InlineItem rest = it;
+                        rest.text = it.text.substr(fitChars);
+                        rest.width = charW * rest.text.size();
+                        it.text = it.text.substr(0, fitChars);
+                        it.width = charW * fitChars;
+                        items.insert(items.begin() + i + 1, rest);
+                    }
+                }
                 break;  // wrap before this item
             }
             chosen.push_back(i);

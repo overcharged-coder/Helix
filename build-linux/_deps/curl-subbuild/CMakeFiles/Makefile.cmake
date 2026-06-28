@@ -10,10 +10,8 @@ set(CMAKE_MAKEFILE_DEPENDS
   "CMakeFiles/4.2.3/CMakeSystem.cmake"
   "CMakeLists.txt"
   "curl-populate-prefix/tmp/curl-populate-mkdirs.cmake"
-  "/usr/share/cmake-4.2/Modules/CMakeDetermineSystem.cmake"
   "/usr/share/cmake-4.2/Modules/CMakeGenericSystem.cmake"
   "/usr/share/cmake-4.2/Modules/CMakeInitializeConfigs.cmake"
-  "/usr/share/cmake-4.2/Modules/CMakeSystem.cmake.in"
   "/usr/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake"
   "/usr/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake"
   "/usr/share/cmake-4.2/Modules/ExternalProject.cmake"
@@ -38,7 +36,6 @@ set(CMAKE_MAKEFILE_OUTPUTS
 
 # Byproducts of CMake generate step:
 set(CMAKE_MAKEFILE_PRODUCTS
-  "CMakeFiles/4.2.3/CMakeSystem.cmake"
   "curl-populate-prefix/tmp/curl-populate-mkdirs.cmake"
   "curl-populate-prefix/src/curl-populate-stamp/download-curl-populate.cmake"
   "curl-populate-prefix/src/curl-populate-stamp/verify-curl-populate.cmake"

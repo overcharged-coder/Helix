@@ -438,6 +438,19 @@ void Renderer::PaintLines(const LayoutBox& box, float scrollY, float topInset, b
                     if (low.find(q) != std::wstring::npos)
                         m_rt->FillRectangle(D2D1::RectF(frag.x - 1, sy, frag.x + frag.w + 1, sy + frag.h), m_findBrush);
                 }
+                // text-overflow: ellipsis — set DWRITE trimming if the parent clips.
+                if (box.style.textOverflow == 1 && box.style.overflowHidden) {
+                    DWRITE_TRIMMING trim = {DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+                    IDWriteInlineObject* ellipsis = nullptr;
+                    m_dwrite->CreateEllipsisTrimmingSign(fmt, &ellipsis);
+                    if (ellipsis) { lay->SetTrimming(&trim, ellipsis); ellipsis->Release(); }
+                    lay->SetMaxWidth(box.contentW);
+                }
+                // text-shadow: draw shadow copy first.
+                if (fs.textShadowSet && fs.textShadowColor.valid && fs.textShadowColor.a > 0) {
+                    if (auto* sb = TempBrush(ToD2Dc(fs.textShadowColor)))
+                        m_rt->DrawTextLayout(D2D1::Point2F(frag.x + fs.textShadowX, sy + fs.textShadowY), lay, sb);
+                }
                 m_rt->DrawTextLayout(D2D1::Point2F(frag.x, sy), lay, brush ? brush : m_textBrush);
                 lay->Release();
             }
