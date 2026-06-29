@@ -134,3 +134,7 @@ void JsEngine::runMacrotasks() {
         } catch (...) {}
     }
 }
+
+bool JsEngine::hasPendingMacrotasks() const {
+    return !m_impl->vm.macrotasks().empty();
+}

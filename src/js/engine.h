@@ -27,6 +27,7 @@ public:
 
     // Run pending macrotasks (called by Win32 WM_TIMER).
     void runMacrotasks();
+    bool hasPendingMacrotasks() const;
 
 private:
     struct Impl;

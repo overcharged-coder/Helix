@@ -60,7 +60,7 @@ public:
     void  SetZoom(float z);
     float GetZoom() const { return m_zoom; }
     const LayoutBox* GetLayoutRoot() const { return m_layoutRoot.get(); }
-    void InvalidateLayout() { m_layoutRoot.reset(); m_layoutDocKey = nullptr; }
+    void InvalidateLayout();
 
     void SetSearchQuery(const std::wstring& q) { m_searchQuery = q; }
     const std::wstring& GetSearchQuery() const { return m_searchQuery; }
@@ -134,6 +134,11 @@ private:
 
     // Cached layout tree — rebuilt only when the document, size, or zoom
     // changes, so scrolling/repainting is cheap.
+    Stylesheet  m_cachedSheet;
+    CssColor    m_cachedPageBg;
+    const Node* m_styleDocKey = nullptr;
+    std::string m_styleBaseUrlKey;
+
     std::unique_ptr<LayoutBox> m_layoutRoot;
     const Node* m_layoutDocKey  = nullptr;
     UINT  m_layoutWKey = 0, m_layoutHKey = 0;

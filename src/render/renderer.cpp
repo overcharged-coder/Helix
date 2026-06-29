@@ -206,6 +206,15 @@ void Renderer::Resize(UINT w, UINT h) {
     if (m_rt) m_rt->Resize(D2D1::SizeU(w, h));
 }
 
+void Renderer::InvalidateLayout() {
+    m_layoutRoot.reset();
+    m_layoutDocKey = nullptr;
+    m_styleDocKey = nullptr;
+    m_styleBaseUrlKey.clear();
+    m_cachedSheet = Stylesheet{};
+    m_cachedPageBg = CssColor{};
+}
+
 void Renderer::SetZoom(float z) {
     m_zoom = std::max(0.5f, std::min(3.f, z));
     // Cached text formats/measurements are size-dependent — invalidate them.
@@ -477,14 +486,19 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
 
     m_rt->BeginDraw();
 
-    Stylesheet sheet;
+    Stylesheet* sheet = nullptr;
     CssColor   pageBg;
     if (doc) {
-        sheet  = CollectStylesheet(doc.get());
-        pageBg = FindBodyBgColor(doc.get(), sheet);
-        // Load @font-face web fonts.
-        if (!sheet.fontFaces.empty())
-            WebFontLoader::instance().loadFonts(sheet, baseUrl, [this]() { InvalidateLayout(); });
+        if (m_styleDocKey != doc.get() || m_styleBaseUrlKey != baseUrl) {
+            m_cachedSheet  = CollectStylesheet(doc.get());
+            m_cachedPageBg = FindBodyBgColor(doc.get(), m_cachedSheet);
+            m_styleDocKey = doc.get();
+            m_styleBaseUrlKey = baseUrl;
+            if (!m_cachedSheet.fontFaces.empty())
+                WebFontLoader::instance().loadFonts(m_cachedSheet, baseUrl, [this]() { InvalidateLayout(); });
+        }
+        sheet = &m_cachedSheet;
+        pageBg = m_cachedPageBg;
     }
 
     // transparent body bg → default white (HwndRenderTarget clear with a=0 shows window black)
@@ -532,7 +546,7 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
             extern const Node* g_hoverNode;
             static const Node* prevHover = nullptr;
             bool hoverChanged = (g_hoverNode != prevHover);
-            bool hoverMayAffectStyle = hoverChanged && StylesheetUsesHover(sheet);
+            bool hoverMayAffectStyle = hoverChanged && sheet && StylesheetUsesHover(*sheet);
             std::map<const Node*, ComputedStyle> oldStyles;
             if (hoverMayAffectStyle && m_layoutRoot) {
                 std::function<void(const LayoutBox&)> collect = [&](const LayoutBox& b) {
@@ -552,7 +566,7 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
             if (!reuse) {
                 LayoutInput in;
                 in.document  = doc.get();
-                in.sheet     = &sheet;
+                in.sheet     = sheet;
                 in.measure   = this;
                 in.viewportW = std::max(100.f, (float)m_width);
                 in.viewportH = std::max(100.f, (float)m_height - topInset);

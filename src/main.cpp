@@ -862,7 +862,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Pass 2: deferred scripts (after DOM is ready).
         if (idx >= 0 && idx < (int)g_tabs.size() && g_tabs[idx].page && g_tabs[idx].page->dom) {
             try {
-                auto repaint = []() { InvalidateContent(); };
+                auto repaint = []() {
+                    g_renderer.InvalidateLayout();
+                    InvalidateContent();
+                };
                 g_js.setDocument(g_tabs[idx].page->dom, repaint, g_tabs[idx].page->url);
                 struct ScriptEntry { std::string source; std::string filename; };
                 std::vector<ScriptEntry> deferred;
@@ -1160,6 +1163,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             rc.bottom = TOP_INSET;
             InvalidateRect(hwnd, &rc, FALSE);
+        } else if (!g_js.hasPendingMacrotasks()) {
+            KillTimer(hwnd, 1);
         }
         return 0;
 

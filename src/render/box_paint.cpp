@@ -442,6 +442,9 @@ bool Renderer::FindTextY(const std::wstring& query, float currentY, bool backwar
 
 void Renderer::PaintLines(const LayoutBox& box, float scrollY, float topInset, bool underFixed) {
     for (const auto& line : box.lines) {
+        float lineY = line.y - (underFixed ? 0.f : scrollY) + topInset;
+        if (lineY + line.h < topInset || lineY > (float)m_height)
+            continue;
         for (const auto& frag : line.frags) {
             if (!frag.src) continue;
             if (frag.src->kind == BoxKind::InlineBlock || frag.src->kind == BoxKind::Replaced) {
@@ -574,6 +577,29 @@ void Renderer::PaintBox(const LayoutBox& box, float scrollY, float topInset, boo
 
     // 2. Children, in CSS2 stacking order (simplified):
     //    negative z-index positioned → in-flow → floats → z>=0 positioned.
+    bool simpleInFlowChildren = true;
+    for (auto& kptr : box.kids) {
+        const LayoutBox* k = kptr.get();
+        if (k->isOutOfFlow() || k->isFloat() || k->style.positionMode == 1
+            || k->style.zIndexSet) {
+            simpleInFlowChildren = false;
+            break;
+        }
+    }
+    if (simpleInFlowChildren) {
+        if (box.establishesInline) {
+            if (!hidden) PaintLines(box, effScroll, topInset, fixed);
+        } else {
+            for (auto& kptr : box.kids) PaintBox(*kptr, scrollY, topInset, fixed);
+        }
+        if (clipped) {
+            m_rt->PopAxisAlignedClip();
+            scrollY = scrollYBefore;
+        }
+        if (hasTransform) m_rt->SetTransform(oldTransform);
+        return;
+    }
+
     std::vector<const LayoutBox*> negZ, inflow, floats, posZ;
     for (auto& kptr : box.kids) {
         const LayoutBox* k = kptr.get();

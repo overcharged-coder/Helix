@@ -295,6 +295,9 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
 
 inline void PaintLines(PaintState& ps, const LayoutBox& box) {
     for (const auto& line : box.lines) {
+        float lineY = line.y - ps.scrollY + ps.topInset;
+        if (lineY + line.h < ps.topInset || lineY > (float)ps.r->Height())
+            continue;
         for (const auto& frag : line.frags) {
             if (!frag.src) continue;
             if (frag.src->kind == BoxKind::InlineBlock || frag.src->kind == BoxKind::Replaced) {
@@ -399,6 +402,32 @@ inline void PaintBoxTree(PaintState& ps, const LayoutBox& box) {
     }
 
     // Children (simplified stacking: in-flow, then floats, then positioned)
+    bool simpleInFlowChildren = true;
+    for (auto& k : box.kids) {
+        if (k->isOutOfFlow() || k->isFloat() || k->style.positionMode == 1
+            || k->style.zIndexSet) {
+            simpleInFlowChildren = false;
+            break;
+        }
+    }
+    if (simpleInFlowChildren) {
+        if (box.establishesInline) {
+            if (!hidden) PaintLines(ps, box);
+        } else {
+            for (auto& k : box.kids) PaintBoxTree(ps, *k);
+        }
+        if (clipped) {
+            ps.r->PopClip();
+            ps.scrollY = savedScrollForOverflow;
+        }
+        if (box.style.transformSet) {
+            const_cast<LayoutBox&>(box).x -= tx;
+            ps.scrollY = savedScrollY;
+            ps.topInset = savedTopInset;
+        }
+        return;
+    }
+
     if (box.establishesInline) {
         if (!hidden) PaintLines(ps, box);
     } else {

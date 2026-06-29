@@ -73,6 +73,7 @@ public:
     // Macrotask queue (setTimeout callbacks).
     struct Macrotask { JsValue fn; std::vector<JsValue> args; int delay; };
     std::vector<Macrotask>& macrotasks() { return m_macrotasks; }
+    const std::vector<Macrotask>& macrotasks() const { return m_macrotasks; }
 
     // DOM dirty flag (set when JS modifies the DOM).
     bool domDirty = false;

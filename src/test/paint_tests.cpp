@@ -74,6 +74,73 @@ TestResult RunPaintTests() {
     }
 
     {
+        auto root = FindRepoRoot();
+        std::string renderer = ReadTextFile(root / "src/render/renderer.cpp");
+        const bool cachesDocumentStyle =
+            renderer.find("m_styleDocKey != doc.get()") != std::string::npos
+            && renderer.find("m_cachedSheet  = CollectStylesheet(doc.get());") != std::string::npos
+            && renderer.find("FindBodyBgColor(doc.get(), m_cachedSheet)") != std::string::npos;
+        ExpectEqual("paint/document-style-is-cached-off-scroll-path",
+            cachesDocumentStyle ? "cached\n" : "per-paint\n",
+            "cached\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        std::string engine = ReadTextFile(root / "src/js/engine.h");
+        const bool timerSleeps =
+            engine.find("hasPendingMacrotasks() const") != std::string::npos
+            && mainWin.find("!g_js.hasPendingMacrotasks()") != std::string::npos
+            && mainWin.find("KillTimer(hwnd, 1);") != std::string::npos;
+        ExpectEqual("paint/windows-js-timer-sleeps-when-idle",
+            timerSleeps ? "sleeps\n" : "spins\n",
+            "sleeps\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        const bool dirtyDropsLayoutCache =
+            mainWin.find("auto repaint = []()") != std::string::npos
+            && mainWin.find("g_renderer.InvalidateLayout();") != std::string::npos
+            && mainWin.find("InvalidateContent();") != std::string::npos;
+        ExpectEqual("paint/dom-dirty-invalidates-layout-cache",
+            dirtyDropsLayoutCache ? "invalidates\n" : "stale\n",
+            "invalidates\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string painter = ReadTextFile(root / "src/render/box_paint.cpp");
+        std::string sharedPainter = ReadTextFile(root / "src/platform/box_painter.h");
+        const bool lineCull =
+            painter.find("lineY + line.h < topInset") != std::string::npos
+            && sharedPainter.find("lineY + line.h < ps.topInset") != std::string::npos;
+        ExpectEqual("paint/offscreen-lines-are-culled-before-fragments",
+            lineCull ? "culled\n" : "walked\n",
+            "culled\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string painter = ReadTextFile(root / "src/render/box_paint.cpp");
+        std::string sharedPainter = ReadTextFile(root / "src/platform/box_painter.h");
+        const bool simpleFastPath =
+            painter.find("bool simpleInFlowChildren = true;") != std::string::npos
+            && sharedPainter.find("bool simpleInFlowChildren = true;") != std::string::npos
+            && painter.find("std::vector<const LayoutBox*> negZ") != std::string::npos;
+        ExpectEqual("paint/simple-inflow-children-skip-stacking-vectors",
+            simpleFastPath ? "fast-path\n" : "vectors\n",
+            "fast-path\n",
+            result);
+    }
+
+    {
         const std::string svg =
             "<svg width=\"12\" height=\"10\" viewBox=\"0 0 12 10\">"
             "<rect x=\"1\" y=\"2\" width=\"4\" height=\"3\" fill=\"red\"/>"
