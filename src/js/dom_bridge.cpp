@@ -467,7 +467,7 @@ static std::vector<SelectorPart> parseSelectorParts(const std::string& selector)
     auto flush = [&]() {
         std::string simple = trimCopy(cur);
         if (!simple.empty()) {
-            parts.push_back({ simple, parts.empty() ? 0 : (pendingCombinator ? pendingCombinator : ' ') });
+            parts.push_back({ simple, parts.empty() ? char(0) : (pendingCombinator ? pendingCombinator : ' ') });
             cur.clear();
             pendingCombinator = ' ';
         }
