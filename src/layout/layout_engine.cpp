@@ -85,6 +85,12 @@ bool HasAttr(const Node* n, const std::string& name) {
     return n && n->attrs.find(name) != n->attrs.end();
 }
 
+std::string LowerAscii(std::string value) {
+    for (char& c : value)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
 // UA default display for an element tag (used when CSS doesn't set display).
 // Returns one of the ComputedStyle display codes (1=block,2=inline,7=inline-block,
 // 8=list-item,5=table,9=table-row,6=table-cell,10=row-group).
@@ -435,6 +441,7 @@ std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& paren
     if (IsSkippedTag(tag)) return nullptr;
     if (HasAttr(node, "hidden")) return nullptr;
     if (tag == "dialog" && !HasAttr(node, "open")) return nullptr;
+    if (tag == "input" && LowerAscii(node->attr("type")) == "hidden") return nullptr;
 
     ComputedStyle s = bc.sheet ? bc.sheet->resolve(node) : ComputedStyle{};
     if (s.isDisplayNone()) return nullptr;

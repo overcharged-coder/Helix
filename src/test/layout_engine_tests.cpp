@@ -448,6 +448,43 @@ TestResult RunLayoutEngineTests() {
             result);
     }
 
+    // Wikipedia's search form includes hidden inputs before/after the visible
+    // search controls; they must not create anonymous white input boxes that
+    // push the real input/button/select into each other.
+    {
+        auto hdom = ParseHtml(
+            "<html><body><form id=\"search\">"
+            "<input type=\"hidden\" id=\"family\" name=\"family\" value=\"wikipedia\">"
+            "<div id=\"search-input\"><input id=\"q\" type=\"search\"><div id=\"picker\"><select id=\"lang\"><option>Afrikaans</option></select></div></div>"
+            "<button id=\"go\">Search</button>"
+            "<input type=\"hidden\" id=\"go-hidden\" value=\"Go\" name=\"go\">"
+            "</form></body></html>");
+        auto hsheet = ParseStylesheet(
+            "#search { width:540px; margin:0; }"
+            "#search-input { display:inline-block; position:relative; width:73%; vertical-align:top; }"
+            "#q { width:100%; height:44px; }"
+            "#picker { position:absolute; top:0; right:0; width:120px; height:44px; }"
+            "#go { display:inline-block; width:23%; min-height:44px; vertical-align:top; }");
+        LayoutInput hin; hin.document = hdom.get(); hin.sheet = &hsheet;
+        hin.measure = &measure; hin.viewportW = 800.f; hin.viewportH = 400.f;
+        auto hl = LayoutDocument(hin);
+        auto* family = FindEngineBoxById(hl.get(), "family");
+        auto* hiddenGo = FindEngineBoxById(hl.get(), "go-hidden");
+        auto* wrap = FindEngineBoxById(hl.get(), "search-input");
+        auto* q = FindEngineBoxById(hl.get(), "q");
+        auto* picker = FindEngineBoxById(hl.get(), "picker");
+        auto* go = FindEngineBoxById(hl.get(), "go");
+        bool rowOk = !family && !hiddenGo && wrap && q && picker && go
+            && std::abs(wrap->x - q->x) < 0.5f
+            && picker->x >= q->x + q->borderBoxW() - picker->borderBoxW() - 1.f
+            && go->x >= wrap->x + wrap->borderBoxW() - 1.f
+            && std::abs(go->y - wrap->y) < 1.f;
+        ExpectEqual("layout-engine/hidden-inputs-do-not-mangle-search-row",
+            rowOk ? "hidden\n" : "visible\n",
+            "hidden\n",
+            result);
+    }
+
     // Dense language lists should wrap into multiple inline lines inside the
     // container instead of overflowing as one massive line.
     {
