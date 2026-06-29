@@ -23,6 +23,24 @@ static void addNative(VM& vm, JsObject* obj, const std::string& name, NativeFn f
     obj->setProp(name, JsValue::object(fnObj));
 }
 
+static bool eventFlag(JsObject* ev, const std::string& name) {
+    if (!ev) return false;
+    return ev->getProp(name).toBool();
+}
+
+static void installEventMethods(VM& vm, JsObject* ev) {
+    if (!ev) return;
+    addNative(vm, ev, "preventDefault", [ev](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+        if (eventFlag(ev, "cancelable"))
+            ev->setProp("defaultPrevented", JsValue::boolean(true));
+        return JsValue::undefined();
+    });
+    addNative(vm, ev, "stopPropagation", [ev](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+        ev->setProp("__helixStopped", JsValue::boolean(true));
+        return JsValue::undefined();
+    });
+}
+
 // ── class-token helpers (for classList) ───────────────────────────────────────
 static std::vector<std::string> classTokens(const std::string& cls) {
     std::vector<std::string> out;
@@ -1149,12 +1167,37 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         if (it != g_eventListeners.end()) {
             auto& list = it->second;
             for (auto li = list.begin(); li != list.end(); ++li)
-                if (li->event == ev) { list.erase(li); break; }
+                if (li->event == ev && li->fn.strictEq(ARG(1))) { list.erase(li); break; }
         }
         return JsValue::undefined();
     });
     addNativeM("dispatchEvent", NATIVE("dispatchEvent") {
-        return JsValue::boolean(true);
+        Node* n = unwrapNode(thisVal);
+        if (!n || args.empty() || !ARG(0).isObject()) return JsValue::boolean(true);
+        JsObject* ev = ARG(0).asObject();
+        std::string type = ev->getProp("type").toString();
+        if (type.empty()) return JsValue::boolean(true);
+        auto shared = getShared(n);
+        ev->setProp("target", shared ? wrapNode(vm, shared) : thisVal);
+        installEventMethods(vm, ev);
+        Node* cur = n;
+        while (cur) {
+            auto curShared = getShared(cur);
+            ev->setProp("currentTarget", curShared ? wrapNode(vm, curShared) : JsValue::null());
+            auto it = g_eventListeners.find(cur);
+            if (it != g_eventListeners.end()) {
+                auto listeners = it->second;
+                for (const auto& listener : listeners) {
+                    if (listener.event != type || !listener.fn.isCallable()) continue;
+                    try { vm.call(listener.fn, curShared ? wrapNode(vm, curShared) : JsValue::undefined(), { ARG(0) }); }
+                    catch (...) {}
+                    if (eventFlag(ev, "__helixStopped")) break;
+                }
+            }
+            if (eventFlag(ev, "__helixStopped") || !eventFlag(ev, "bubbles")) break;
+            cur = cur->parent;
+        }
+        return JsValue::boolean(!eventFlag(ev, "defaultPrevented"));
     });
     addNativeM("matches", NATIVE("matches") {
         Node* n = unwrapNode(thisVal);
@@ -1424,6 +1467,201 @@ static void applyLocationProps(VM& vm, JsObject* loc, const std::string& href) {
     loc->setProp("port",     vm.str(parsed.port));
 }
 
+static std::string urlDecodeComponent(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '%' && i + 2 < input.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+                if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+                return -1;
+            };
+            int hi = hex(input[i + 1]), lo = hex(input[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += static_cast<char>((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += input[i] == '+' ? ' ' : input[i];
+    }
+    return out;
+}
+
+static std::string urlEncodeComponent(const std::string& input) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : input) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
+        else if (c == ' ') out += '+';
+        else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+using QueryPairs = std::vector<std::pair<std::string, std::string>>;
+
+static QueryPairs parseQueryPairs(std::string query) {
+    if (!query.empty() && query.front() == '?') query.erase(query.begin());
+    QueryPairs pairs;
+    size_t pos = 0;
+    while (pos <= query.size()) {
+        size_t amp = query.find('&', pos);
+        std::string part = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+        if (!part.empty()) {
+            size_t eq = part.find('=');
+            std::string key = eq == std::string::npos ? part : part.substr(0, eq);
+            std::string value = eq == std::string::npos ? "" : part.substr(eq + 1);
+            pairs.push_back({ urlDecodeComponent(key), urlDecodeComponent(value) });
+        }
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    return pairs;
+}
+
+static std::string serializeQueryPairs(const QueryPairs& pairs) {
+    std::string out;
+    for (const auto& [key, value] : pairs) {
+        if (!out.empty()) out += '&';
+        out += urlEncodeComponent(key);
+        out += '=';
+        out += urlEncodeComponent(value);
+    }
+    return out;
+}
+
+static JsValue makeURLSearchParams(VM& vm, const std::string& query, std::function<void(const std::string&)> onChange = {}) {
+    auto pairs = std::make_shared<QueryPairs>(parseQueryPairs(query));
+    auto notify = [pairs, onChange]() {
+        if (onChange) onChange(serializeQueryPairs(*pairs));
+    };
+    auto* params = vm.gc().newObject(ObjKind::Plain);
+    addNative(vm, params, "get", [pairs](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        for (const auto& pair : *pairs)
+            if (pair.first == key) return vm.str(pair.second);
+        return JsValue::null();
+    });
+    addNative(vm, params, "getAll", [pairs](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        auto* arr = vm.gc().newArray();
+        JsValue arrayCtor = vm.getGlobal("Array");
+        if (arrayCtor.isObject()) {
+            JsValue proto = arrayCtor.asObject()->getProp("prototype");
+            if (proto.isObject()) arr->proto = proto.asObject();
+        }
+        for (const auto& pair : *pairs)
+            if (pair.first == key) arr->arrayPush(vm.str(pair.second));
+        return JsValue::object(arr);
+    });
+    addNative(vm, params, "has", [pairs](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        for (const auto& pair : *pairs)
+            if (pair.first == key) return JsValue::boolean(true);
+        return JsValue::boolean(false);
+    });
+    addNative(vm, params, "set", [pairs, notify](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        std::string value = args.size() > 1 ? args[1].toString() : "";
+        bool replaced = false;
+        for (auto it = pairs->begin(); it != pairs->end();) {
+            if (it->first == key) {
+                if (!replaced) { it->second = value; replaced = true; ++it; }
+                else it = pairs->erase(it);
+            } else ++it;
+        }
+        if (!replaced) pairs->push_back({ key, value });
+        notify();
+        return JsValue::undefined();
+    });
+    addNative(vm, params, "append", [pairs, notify](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        pairs->push_back({ args.empty() ? "" : args[0].toString(), args.size() > 1 ? args[1].toString() : "" });
+        notify();
+        return JsValue::undefined();
+    });
+    addNative(vm, params, "delete", [pairs, notify](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        pairs->erase(std::remove_if(pairs->begin(), pairs->end(),
+            [&](const auto& pair) { return pair.first == key; }), pairs->end());
+        notify();
+        return JsValue::undefined();
+    });
+    addNative(vm, params, "toString", [pairs](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+        return vm.str(serializeQueryPairs(*pairs));
+    });
+    return JsValue::object(params);
+}
+
+static JsValue makeStorageObject(VM& vm, std::shared_ptr<std::map<std::string, std::string>> storage) {
+    auto* obj = vm.gc().newObject(ObjKind::Plain);
+    addNative(vm, obj, "getItem", [storage](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        auto it = storage->find(key);
+        if (it != storage->end()) return vm.str(it->second);
+        if (thisVal.isObject()) {
+            JsValue prop = thisVal.asObject()->getProp(key);
+            if (!prop.isUndefined()) return vm.str(prop.toString());
+        }
+        return JsValue::null();
+    });
+    addNative(vm, obj, "setItem", [storage](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        std::string value = args.size() > 1 ? args[1].toString() : "";
+        (*storage)[key] = value;
+        if (thisVal.isObject()) thisVal.asObject()->setProp(key, vm.str(value));
+        return JsValue::undefined();
+    });
+    addNative(vm, obj, "removeItem", [storage](VM&, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        storage->erase(key);
+        if (thisVal.isObject()) thisVal.asObject()->deleteProp(key);
+        return JsValue::undefined();
+    });
+    addNative(vm, obj, "clear", [storage](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+        storage->clear();
+        return JsValue::undefined();
+    });
+    addNative(vm, obj, "key", [storage](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        int index = args.empty() ? 0 : args[0].toInt32();
+        if (index < 0 || index >= static_cast<int>(storage->size())) return JsValue::null();
+        auto it = storage->begin();
+        std::advance(it, index);
+        return vm.str(it->first);
+    });
+    obj->setProp("length", JsValue::integer(static_cast<int32_t>(storage->size())));
+    return JsValue::object(obj);
+}
+
+static JsValue makeFetchResponse(VM& vm, const std::string& url, const FetchResult& res) {
+    auto* response = vm.gc().newObject(ObjKind::Plain);
+    response->setProp("ok", JsValue::boolean(res.success));
+    response->setProp("status", JsValue::integer(res.success ? 200 : 0));
+    response->setProp("url", vm.str(url));
+    std::string body = res.success ? res.body : "";
+    auto bodyStr = vm.str(body);
+    addNative(vm, response, "text", [bodyStr](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        return v.promiseResolve(bodyStr);
+    });
+    addNative(vm, response, "json", [body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        JsValue jsonVal = v.getGlobal("JSON");
+        JsValue parsed = JsValue::undefined();
+        if (jsonVal.isObject()) {
+            JsValue parseFn = jsonVal.asObject()->getProp("parse");
+            if (parseFn.isCallable())
+                parsed = v.call(parseFn, jsonVal, { v.str(body) });
+        }
+        return v.promiseResolve(parsed);
+    });
+    return JsValue::object(response);
+}
+
 void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                  std::function<void()> onRepaint,
                  const std::string& pageUrl,
@@ -1649,6 +1887,49 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     syncWindowScrollGlobals(vm);
     vm.setGlobal("devicePixelRatio", JsValue::number(1.0));
 
+    static auto localStorageData = std::make_shared<std::map<std::string, std::string>>();
+    auto sessionStorageData = std::make_shared<std::map<std::string, std::string>>();
+    vm.setGlobal("localStorage", makeStorageObject(vm, localStorageData));
+    vm.setGlobal("sessionStorage", makeStorageObject(vm, sessionStorageData));
+
+    vm.setGlobal("URLSearchParams", JsValue::object(vm.gc().newNativeFunction(
+        [](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+            return makeURLSearchParams(vm, args.empty() ? "" : args[0].toString());
+        }, "URLSearchParams")));
+
+    vm.setGlobal("URL", JsValue::object(vm.gc().newNativeFunction(
+        [pageUrl](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+            std::string input = args.empty() ? "" : args[0].toString();
+            std::string base = args.size() > 1 ? args[1].toString() : pageUrl;
+            std::string href = ResolveUrlAgainstBase(input, base);
+            auto* url = vm.gc().newObject(ObjKind::Plain);
+            VM* vmPtr = &vm;
+            auto apply = [url, vmPtr](const std::string& nextHref) {
+                ParsedDomUrl parsed = parseDomUrl(nextHref);
+                url->setProp("href", vmPtr->str(parsed.href));
+                url->setProp("origin", vmPtr->str(parsed.origin));
+                url->setProp("protocol", vmPtr->str(parsed.protocol));
+                url->setProp("host", vmPtr->str(parsed.host));
+                url->setProp("hostname", vmPtr->str(parsed.hostname));
+                url->setProp("pathname", vmPtr->str(parsed.pathname));
+                url->setProp("search", vmPtr->str(parsed.search));
+                url->setProp("hash", vmPtr->str(parsed.hash));
+            };
+            apply(href);
+            auto updateSearch = [url, apply](const std::string& query) mutable {
+                std::string origin = url->getProp("origin").toString();
+                std::string path = url->getProp("pathname").toString();
+                std::string hash = url->getProp("hash").toString();
+                std::string next = origin + path + (query.empty() ? "" : "?" + query) + hash;
+                apply(next);
+            };
+            url->setProp("searchParams", makeURLSearchParams(vm, parseDomUrl(href).search, updateSearch));
+            addNative(vm, url, "toString", [url](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+                return vm.str(url->getProp("href").toString());
+            });
+            return JsValue::object(url);
+        }, "URL")));
+
     // getComputedStyle(element): lightweight CSSOM from inline style + defaults.
     vm.setGlobal("getComputedStyle", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("getComputedStyle") {
@@ -1670,13 +1951,30 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     // matchMedia(query) — returns { matches: false, media: query }.
     vm.setGlobal("matchMedia", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("matchMedia") {
-            std::string query = ARG_STR(0);
+            std::string query = lowerCopy(ARG_STR(0));
             auto* mql = vm.gc().newObject(ObjKind::Plain);
-            // Simple checks for common queries.
-            bool matches = false;
-            if (query.find("(prefers-color-scheme: light)") != std::string::npos) matches = true;
+            bool matches = true;
+            if (query.find("not ") != std::string::npos) matches = false;
+            if (query.find("screen") != std::string::npos || query.find("all") != std::string::npos) matches = matches && true;
+            if (query.find("prefers-color-scheme: dark") != std::string::npos) matches = false;
+            if (query.find("prefers-color-scheme: light") != std::string::npos) matches = matches && true;
+            auto parsePxAfter = [&](const std::string& needle, float fallback) {
+                size_t pos = query.find(needle);
+                if (pos == std::string::npos) return fallback;
+                pos += needle.size();
+                while (pos < query.size() && (query[pos] == ' ' || query[pos] == ':')) ++pos;
+                try { return std::stof(query.substr(pos)); } catch (...) { return fallback; }
+            };
+            float minW = parsePxAfter("min-width", -1.f);
+            float maxW = parsePxAfter("max-width", -1.f);
+            float minH = parsePxAfter("min-height", -1.f);
+            float maxH = parsePxAfter("max-height", -1.f);
+            if (minW >= 0) matches = matches && 1280.f >= minW;
+            if (maxW >= 0) matches = matches && 1280.f <= maxW;
+            if (minH >= 0) matches = matches && 800.f >= minH;
+            if (maxH >= 0) matches = matches && 800.f <= maxH;
             mql->setProp("matches", JsValue::boolean(matches));
-            mql->setProp("media", vm.str(query));
+            mql->setProp("media", vm.str(ARG_STR(0)));
             addNative(vm, mql, "addEventListener", NATIVE("mql_ael") { return JsValue::undefined(); });
             addNative(vm, mql, "removeEventListener", NATIVE("mql_rel") { return JsValue::undefined(); });
             addNative(vm, mql, "addListener", NATIVE("mql_al") { return JsValue::undefined(); });
@@ -1689,29 +1987,21 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             std::string url = ARG_STR(0);
             // Synchronous fetch (simplified — real fetch is async, but our VM
             // doesn't have a true event loop yet).
-            auto res = FetchResourceCached(url, 12 * 1024 * 1024, ResourceKind::Other);
-            auto* response = vm.gc().newObject(ObjKind::Plain);
-            response->setProp("ok", JsValue::boolean(res.success));
-            response->setProp("status", JsValue::integer(res.success ? 200 : 0));
-            response->setProp("url", vm.str(url));
-            std::string body = res.success ? res.body : "";
-            // .text() returns a resolved Promise with the body string.
-            auto bodyStr = vm.str(body);
-            addNative(vm, response, "text", [bodyStr](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
-                return v.promiseResolve(bodyStr);
-            });
-            // .json() parses the body as JSON.
-            addNative(vm, response, "json", [body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
-                JsValue jsonVal = v.getGlobal("JSON");
-                JsValue parsed = JsValue::undefined();
-                if (jsonVal.isObject()) {
-                    JsValue parseFn = jsonVal.asObject()->getProp("parse");
-                    if (parseFn.isCallable())
-                        parsed = v.call(parseFn, jsonVal, { v.str(body) });
-                }
-                return v.promiseResolve(parsed);
-            });
-            return vm.promiseResolve(JsValue::object(response));
+            auto* promise = vm.gc().newPromise();
+            vm.initPromiseObject(promise);
+            VM* vmPtr = &vm;
+            auto alive = vm.lifetimeToken();
+            FetchResourceAsync(url, 12 * 1024 * 1024, ResourceKind::Other,
+                [vmPtr, alive, promise, url](FetchResult res) {
+                    if (alive.expired()) return;
+                    if (res.success) {
+                        vmPtr->settlePromiseObject(promise, makeFetchResponse(*vmPtr, url, res), false);
+                    } else {
+                        vmPtr->settlePromiseObject(promise, vmPtr->makeError("TypeError", "fetch failed"), true);
+                    }
+                    vmPtr->drainMicrotasks();
+                });
+            return JsValue::object(promise);
         }, "fetch")));
 
     // window.addEventListener / removeEventListener
@@ -1936,16 +2226,28 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
 
     // CustomEvent / Event
     auto makeEventCtor = [&](const char* name) {
-        vm.setGlobal(name, JsValue::object(vm.gc().newNativeFunction(NATIVE("Event") {
+        std::string ctorName = name;
+        vm.setGlobal(name, JsValue::object(vm.gc().newNativeFunction(
+            [ctorName](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
             auto* ev = vm.gc().newObject(ObjKind::Plain);
-            ev->setProp("type",    ARG(0));
-            ev->setProp("bubbles", JsValue::boolean(false));
-            ev->setProp("cancelable", JsValue::boolean(false));
+            ev->setProp("type", args.empty() ? JsValue::undefined() : args[0]);
+            bool bubbles = false;
+            bool cancelable = false;
+            JsValue detail = JsValue::null();
+            if (args.size() > 1 && args[1].isObject()) {
+                auto* options = args[1].asObject();
+                bubbles = options->getProp("bubbles").toBool();
+                cancelable = options->getProp("cancelable").toBool();
+                JsValue d = options->getProp("detail");
+                if (!d.isUndefined()) detail = d;
+            }
+            ev->setProp("bubbles", JsValue::boolean(bubbles));
+            ev->setProp("cancelable", JsValue::boolean(cancelable));
             ev->setProp("target",  JsValue::null());
             ev->setProp("currentTarget", JsValue::null());
             ev->setProp("defaultPrevented", JsValue::boolean(false));
-            addNative(vm, ev, "preventDefault",  NATIVE("preventDefault")  { return JsValue::undefined(); });
-            addNative(vm, ev, "stopPropagation", NATIVE("stopPropagation") { return JsValue::undefined(); });
+            if (ctorName == "CustomEvent") ev->setProp("detail", detail);
+            installEventMethods(vm, ev);
             return JsValue::object(ev);
         }, name)));
     };
@@ -1969,10 +2271,11 @@ void dispatchDomEvent(VM& vm, Node* target, const std::string& eventName) {
     ev->setProp("type", vm.str(eventName));
     ev->setProp("target", wrapNode(vm, getShared(target) ? getShared(target)
                                        : std::shared_ptr<Node>(target, [](Node*){})));
-    ev->setProp("preventDefault", JsValue::object(vm.gc().newNativeFunction(
-        [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "preventDefault")));
-    ev->setProp("stopPropagation", JsValue::object(vm.gc().newNativeFunction(
-        [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "stopPropagation")));
+    ev->setProp("currentTarget", JsValue::null());
+    ev->setProp("bubbles", JsValue::boolean(true));
+    ev->setProp("cancelable", JsValue::boolean(true));
+    ev->setProp("defaultPrevented", JsValue::boolean(false));
+    installEventMethods(vm, ev);
     JsValue evVal = JsValue::object(ev);
 
     // Walk from target up through ancestors (bubble phase).
@@ -1982,11 +2285,15 @@ void dispatchDomEvent(VM& vm, Node* target, const std::string& eventName) {
         if (it != g_eventListeners.end()) {
             for (auto& listener : it->second) {
                 if (listener.event == eventName) {
-                    try { vm.call(listener.fn, JsValue::undefined(), { evVal }); }
+                    auto curShared = getShared(cur);
+                    ev->setProp("currentTarget", curShared ? wrapNode(vm, curShared) : JsValue::null());
+                    try { vm.call(listener.fn, curShared ? wrapNode(vm, curShared) : JsValue::undefined(), { evVal }); }
                     catch (...) {}
+                    if (eventFlag(ev, "__helixStopped")) break;
                 }
             }
         }
+        if (eventFlag(ev, "__helixStopped") || !eventFlag(ev, "bubbles")) break;
         cur = cur->parent;
     }
 }
@@ -1997,12 +2304,14 @@ void dispatchWindowEvent(VM& vm, const std::string& eventName, JsValue eventValu
         auto* ev = vm.gc().newObject(ObjKind::Plain);
         ev->setProp("type", vm.str(eventName));
         ev->setProp("target", JsValue::object(vm.globals()));
+        ev->setProp("currentTarget", JsValue::object(vm.globals()));
+        ev->setProp("bubbles", JsValue::boolean(false));
+        ev->setProp("cancelable", JsValue::boolean(true));
         ev->setProp("defaultPrevented", JsValue::boolean(false));
-        ev->setProp("preventDefault", JsValue::object(vm.gc().newNativeFunction(
-            [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "preventDefault")));
-        ev->setProp("stopPropagation", JsValue::object(vm.gc().newNativeFunction(
-            [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "stopPropagation")));
+        installEventMethods(vm, ev);
         evVal = JsValue::object(ev);
+    } else {
+        installEventMethods(vm, evVal.asObject());
     }
 
     JsValue propertyHandler = vm.getGlobal("on" + eventName);
@@ -2013,6 +2322,7 @@ void dispatchWindowEvent(VM& vm, const std::string& eventName, JsValue eventValu
     for (const auto& listener : listeners) {
         if (listener.event != eventName || !listener.fn.isCallable()) continue;
         try { vm.call(listener.fn, JsValue::object(vm.globals()), { evVal }); } catch (...) {}
+        if (evVal.isObject() && eventFlag(evVal.asObject(), "__helixStopped")) break;
     }
     vm.drainMicrotasks();
 }

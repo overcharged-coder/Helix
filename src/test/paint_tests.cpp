@@ -103,6 +103,34 @@ TestResult RunPaintTests() {
     {
         auto root = FindRepoRoot();
         std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        const bool scriptBatches =
+            mainWin.find("g_pendingPageScripts") != std::string::npos
+            && mainWin.find("RunPendingPageScripts(") != std::string::npos
+            && mainWin.find("kMaxScriptsPerTimerTick") != std::string::npos
+            && mainWin.find("fetchBeforeRun") != std::string::npos
+            && mainWin.find("RunPendingPageScripts(hwnd);") != std::string::npos;
+        ExpectEqual("paint/windows-page-scripts-run-in-timer-batches",
+            scriptBatches ? "batched\n" : "blocking\n",
+            "batched\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        const bool preloadedScripts =
+            mainWin.find("__helix_script_filename") != std::string::npos
+            && mainWin.find("preloadedFilename") != std::string::npos
+            && mainWin.find("!preloadedFilename.empty()") != std::string::npos;
+        ExpectEqual("paint/windows-page-scripts-use-preloaded-worker-body",
+            preloadedScripts ? "preloaded\n" : "refetches\n",
+            "preloaded\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
         const bool dirtyDropsLayoutCache =
             mainWin.find("auto repaint = []()") != std::string::npos
             && mainWin.find("g_renderer.InvalidateLayout();") != std::string::npos
@@ -216,6 +244,23 @@ TestResult RunPaintTests() {
             && renderer.find("return m_lastHitHref;") != std::string::npos;
         ExpectEqual("paint/link-hit-test-reuses-last-region",
             hitCache ? "cached\n" : "scan-only\n",
+            "cached\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        std::string renderer = ReadTextFile(root / "src/render/renderer.cpp");
+        std::string rendererH = ReadTextFile(root / "src/render/renderer.h");
+        const bool hoverNodeCache =
+            rendererH.find("HoverNodeAt(") != std::string::npos
+            && rendererH.find("m_lastHoverNodeValid") != std::string::npos
+            && renderer.find("m_lastHoverNodeRegion") != std::string::npos
+            && mainWin.find("g_renderer.HoverNodeAt(") != std::string::npos
+            && mainWin.find("FormState::hitTestNode(*g_renderer.GetLayoutRoot()") == std::string::npos;
+        ExpectEqual("paint/hover-node-hit-test-reuses-last-region",
+            hoverNodeCache ? "cached\n" : "walks-tree\n",
             "cached\n",
             result);
     }

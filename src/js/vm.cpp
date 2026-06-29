@@ -300,6 +300,14 @@ static void settlePromiseWith(VM& vm, JsObject* target, JsValue value, bool reje
     vm.resolvePromise(target, value);
 }
 
+void VM::initPromiseObject(JsObject* p) {
+    attachPromiseMethods(*this, p);
+}
+
+void VM::settlePromiseObject(JsObject* p, JsValue value, bool rejected) {
+    settlePromiseWith(*this, p, value, rejected);
+}
+
 JsValue VM::promiseResolve(JsValue val) {
     auto* p = m_gc.newPromise();
     attachPromiseMethods(*this, p);

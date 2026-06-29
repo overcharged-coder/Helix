@@ -9,9 +9,12 @@
 #include "js/vm.h"
 #include "js/dom_bridge.h"
 #include "html/parser.h"
+#include "network/resource_cache.h"
 
+#include <chrono>
 #include <sstream>
 #include <string>
+#include <thread>
 
 static std::string ValueForSnapshot(const JsValue& value) {
     std::ostringstream out;
@@ -347,10 +350,110 @@ static std::string RunFetchPromiseShapeSnapshot() {
         "}).then(function(text) { globalThis.fetched = globalThis.fetched + ':' + text; });\n",
         "fetch-promise-shape");
     if (!ok) return "script failed\n";
+    std::string immediate = "missing body";
+    ok = engine.runScript(
+        "document.getElementsByTagName('body')[0].setAttribute('data-immediate', globalThis.fetched);\n",
+        "fetch-promise-immediate");
+    if (!ok) return "script failed\n";
+    if (Node* body = FindByTag(dom.get(), "body"))
+        immediate = body->attr("data-immediate");
+    for (int i = 0; i < 200 && HasPendingResourceCompletions(); ++i) {
+        DrainResourceCompletions();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    DrainResourceCompletions();
     ok = engine.runScript(
         "document.getElementsByTagName('body')[0].setAttribute('data-result', globalThis.fetched);\n",
         "fetch-promise-result");
     if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? immediate + "|" + body->attr("data-result") + "\n" : "missing body\n";
+}
+
+static std::string RunPromiseConstructorCombinatorsSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body></body></html>");
+    engine.setDocument(dom, []() {});
+    bool ok = engine.runScript(
+        "globalThis.promiseOut = 'p:';\n"
+        "new Promise(function(resolve) { resolve('made'); })\n"
+        "  .then(function(value) { globalThis.promiseOut += value; return value + '-chain'; })\n"
+        "  .then(function(value) { globalThis.promiseOut += '|' + value; });\n"
+        "Promise.all([Promise.resolve('a'), 'b']).then(function(values) {\n"
+        "  globalThis.promiseOut += '|all=' + values[0] + values[1];\n"
+        "});\n"
+        "Promise.race([Promise.resolve('r'), Promise.resolve('s')]).then(function(value) {\n"
+        "  globalThis.promiseOut += '|race=' + value;\n"
+        "});\n"
+        "Promise.allSettled([Promise.resolve('ok'), Promise.reject('bad')]).then(function(values) {\n"
+        "  globalThis.promiseOut += '|settled=' + values[0].status + '/' + values[1].status;\n"
+        "});\n",
+        "promise-combinators");
+    if (!ok) return "script failed\n";
+    ok = engine.runScript(
+        "document.getElementsByTagName('body')[0].setAttribute('data-result', globalThis.promiseOut);\n",
+        "promise-combinators-result");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
+static std::string RunDomEventCancellationSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body><div id=\"outer\"><button id=\"btn\"></button></div></body></html>");
+    engine.setDocument(dom, []() {});
+    bool ok = engine.runScript(
+        "globalThis.events = 'e:';\n"
+        "var outer = document.getElementById('outer');\n"
+        "var btn = document.getElementById('btn');\n"
+        "outer.addEventListener('click', function(e) { globalThis.events += '|outer:' + e.defaultPrevented; });\n"
+        "btn.addEventListener('click', function(e) { globalThis.events += 'btn:' + e.currentTarget.id + '/' + e.target.id; e.preventDefault(); e.stopPropagation(); });\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'listeners');\n",
+        "dom-event-listeners");
+    if (!ok) {
+        Node* body = FindByTag(dom.get(), "body");
+        return std::string("failed:") + (body ? body->attr("data-stage") : "no-body") + "\n";
+    }
+    ok = engine.runScript(
+        "var btn = document.getElementById('btn');\n"
+        "var ev = new Event('click', { bubbles: true, cancelable: true });\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'event');\n"
+        "var result = btn.dispatchEvent(ev);\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'dispatch');\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-result', globalThis.events + '|result=' + result + '|default=' + ev.defaultPrevented);\n",
+        "dom-event-cancel");
+    if (!ok) {
+        Node* body = FindByTag(dom.get(), "body");
+        return std::string("failed:") + (body ? body->attr("data-stage") : "no-body") + "\n";
+    }
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
+static std::string RunWebPlatformSurfaceSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body></body></html>");
+    engine.setDocument(dom, []() {}, "https://example.org/wiki/Page?old=1#top");
+    bool ok = engine.runScript(
+        "localStorage.setItem('mw-test', '42');\n"
+        "sessionStorage.temp = 'tab';\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'storage');\n"
+        "var u = new URL('/w/index.php?title=Helix&oldid=7#History', location.href);\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'url');\n"
+        "u.searchParams.set('action', 'view');\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'url-set');\n"
+        "var params = new URLSearchParams('a=1&b=two');\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'params');\n"
+        "params.append('a', '3');\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'append');\n"
+        "var mq = matchMedia('(min-width: 1px) and (prefers-color-scheme: light)');\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-stage', 'media');\n"
+        "document.getElementsByTagName('body')[0].setAttribute('data-result', localStorage.getItem('mw-test') + '|' + sessionStorage.getItem('temp') + '|' + u.pathname + '|' + u.searchParams.get('title') + '|' + u.searchParams.get('action') + '|' + params.getAll('a').join(',') + '|' + mq.matches);\n",
+        "web-platform-surface");
+    if (!ok) {
+        Node* body = FindByTag(dom.get(), "body");
+        return std::string("failed:") + (body ? body->attr("data-stage") : "no-body") + "\n";
+    }
     Node* body = FindByTag(dom.get(), "body");
     return body ? body->attr("data-result") + "\n" : "missing body\n";
 }
@@ -419,7 +522,25 @@ TestResult RunJsTests() {
     ExpectEqual(
         "js/async/fetch-uses-real-promise-shape",
         RunFetchPromiseShapeSnapshot(),
-        "true:200:data:text/plain,hello:hello\n",
+        "pending|true:200:data:text/plain,hello:hello\n",
+        result);
+
+    ExpectEqual(
+        "js/async/promise-constructor-and-combinators",
+        RunPromiseConstructorCombinatorsSnapshot(),
+        "p:made|made-chain|all=ab|race=r|settled=fulfilled/rejected\n",
+        result);
+
+    ExpectEqual(
+        "js/dom/event-cancellation-bubbling-and-targets",
+        RunDomEventCancellationSnapshot(),
+        "e:btn:btn/btn|result=false|default=true\n",
+        result);
+
+    ExpectEqual(
+        "js/web-platform/storage-url-and-matchmedia",
+        RunWebPlatformSurfaceSnapshot(),
+        "42|tab|/w/index.php|Helix|view|1,3|true\n",
         result);
 
     ExpectEqual(

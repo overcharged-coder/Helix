@@ -9,9 +9,9 @@
 #include <vector>
 
 namespace {
-constexpr size_t kMaxScripts = 24;
-constexpr size_t kMaxTotalBytes = 512 * 1024;
-constexpr size_t kMaxScriptBytes = 32 * 1024; // matches JsEngine's safe parser limit
+constexpr size_t kMaxScripts = 64;
+constexpr size_t kMaxTotalBytes = 2 * 1024 * 1024;
+constexpr size_t kMaxScriptBytes = 1024 * 1024;
 
 std::string LowerTrim(std::string value) {
     const auto notSpace = [](unsigned char c) { return !std::isspace(c); };

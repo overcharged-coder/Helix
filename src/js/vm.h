@@ -40,6 +40,7 @@ public:
 
     // GC access for built-ins.
     GC& gc() { return m_gc; }
+    std::weak_ptr<bool> lifetimeToken() const { return m_lifetimeToken; }
 
     // String interning helpers.
     JsValue str(const std::string& s)  { return JsValue::string(m_gc.internString(s)); }
@@ -61,6 +62,8 @@ public:
     // Async/Promise support.
     JsValue promiseResolve(JsValue val);
     JsValue promiseReject(JsValue reason);
+    void    initPromiseObject(JsObject* p);
+    void    settlePromiseObject(JsObject* p, JsValue value, bool rejected = false);
     void    promiseThen(JsObject* p, JsValue onFulfilled, JsValue onRejected);
     void    resolvePromise(JsObject* p, JsValue val);
     void    rejectPromise(JsObject* p, JsValue reason);
@@ -116,6 +119,7 @@ private:
     std::vector<Microtask> m_microtasks;
     std::vector<Macrotask> m_macrotasks;
     int m_nextMacrotaskId = 1;
+    std::shared_ptr<bool> m_lifetimeToken = std::make_shared<bool>(true);
 
     // Runaway-script guard: a top-level execution is aborted once it exceeds a
     // wall-clock deadline, so an infinite loop / pathological script can't hang

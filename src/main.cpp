@@ -23,6 +23,7 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <deque>
 #include <algorithm>
 #include <cctype>
 #include <mutex>
@@ -57,6 +58,18 @@ static auto& g_activeTab = g_chrome.state.activeTab;
 static auto& g_formState = g_chrome.state.form;
 static auto& g_updater   = g_chrome.state.updater;
 static auto& g_js        = g_chrome.state.js;
+
+struct PendingPageScript {
+    int tabIdx = -1;
+    std::string pageUrl;
+    std::string source;
+    std::string filename;
+    bool dispatchLoadEvents = false;
+    bool fetchBeforeRun = false;
+};
+
+static constexpr size_t kMaxScriptsPerTimerTick = 2;
+static std::deque<PendingPageScript> g_pendingPageScripts;
 
 static HCURSOR  g_cursorArrow, g_cursorHand;
 static HFONT    g_uiFont = nullptr;
@@ -197,6 +210,49 @@ static void InvalidateContent() {
     InvalidateRect(g_hwnd, &rc, FALSE);
 }
 
+static void ClearPendingPageScriptsForTab(int tabIdx) {
+    g_pendingPageScripts.erase(
+        std::remove_if(g_pendingPageScripts.begin(), g_pendingPageScripts.end(),
+            [tabIdx](const PendingPageScript& job) { return job.tabIdx == tabIdx; }),
+        g_pendingPageScripts.end());
+}
+
+static bool PendingPageScriptStillCurrent(const PendingPageScript& job) {
+    return job.tabIdx >= 0
+        && job.tabIdx < (int)g_tabs.size()
+        && g_tabs[job.tabIdx].page
+        && g_tabs[job.tabIdx].page->url == job.pageUrl;
+}
+
+static void RunPendingPageScripts(HWND hwnd) {
+    size_t ran = 0;
+    while (!g_pendingPageScripts.empty() && ran < kMaxScriptsPerTimerTick) {
+        PendingPageScript job = std::move(g_pendingPageScripts.front());
+        g_pendingPageScripts.pop_front();
+        if (!PendingPageScriptStillCurrent(job)) continue;
+        try {
+            if (job.dispatchLoadEvents) {
+                g_js.dispatchDocumentEvent("DOMContentLoaded");
+                g_js.dispatchWindowEvent("load");
+            } else {
+                std::string source = std::move(job.source);
+                if (job.fetchBeforeRun) {
+                    auto res = FetchResourceCached(job.filename, 1024 * 1024, ResourceKind::Script);
+                    if (res.success && !res.body.empty())
+                        source = DecodeTextToUtf8(res.body, res.contentType);
+                }
+                if (!source.empty())
+                    g_js.runScript(source, job.filename);
+            }
+        } catch (...) {
+            OutputDebugStringA("[JS] Pending page script failed; continuing\n");
+        }
+        ++ran;
+    }
+    if (!g_pendingPageScripts.empty())
+        SetTimer(hwnd, 1, 16, NULL);
+}
+
 // Home page HTML comes from HomePageHtml() in browser_core.h.
 
 // ─── title extraction ────────────────────────────────────────────────────────
@@ -235,6 +291,7 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
     if (tabIdx < 0 || tabIdx >= (int)g_tabs.size()) return;
     Tab& tab = g_tabs[tabIdx];
     if (tab.loading) return;
+    ClearPendingPageScriptsForTab(tabIdx);
 
     std::string url = rawUrl;
     tab.displayUrl.clear();
@@ -926,8 +983,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     InvalidateContent();
                 };
                 g_js.setDocument(g_tabs[idx].page->dom, repaint, g_tabs[idx].page->url, std::move(callbacks));
-                struct ScriptEntry { std::string source; std::string filename; };
+                struct ScriptEntry { std::string source; std::string filename; bool fetchBeforeRun = false; };
                 std::vector<ScriptEntry> deferred;
+                std::vector<ScriptEntry> blocking;
+                const std::string pageUrl = g_tabs[idx].page->url;
+                ClearPendingPageScriptsForTab(idx);
                 std::vector<const Node*> stack;
                 stack.push_back(g_tabs[idx].page->dom.get());
                 size_t scriptCount = 0;
@@ -944,34 +1004,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         std::string source;
                         std::string srcUrl = n->attr("src");
                         std::string filename = "inline";
-                        if (!srcUrl.empty() && !skip) {
+                        std::string preloadedFilename = n->attr("__helix_script_filename");
+                        if (!preloadedFilename.empty() && !skip) {
+                            filename = preloadedFilename;
+                            for (auto& c : n->children)
+                                if (c->type == NodeType::Text) source += c->text;
+                        } else if (!srcUrl.empty() && !skip) {
                             std::string resolved = ResolveUrlAgainstBase(srcUrl, g_tabs[idx].page->url);
-                            auto res = FetchResourceCached(resolved, 256 * 1024, ResourceKind::Script);
-                            if (res.success && !res.body.empty()) {
-                                source = res.body;
-                                filename = resolved;
-                            }
+                            filename = resolved;
                         } else {
                             for (auto& c : n->children)
                                 if (c->type == NodeType::Text) source += c->text;
                         }
+                        const bool fetchBeforeRun = !srcUrl.empty() && preloadedFilename.empty() && !skip;
                         totalScriptBytes += source.size();
-                        if (!skip && !source.empty() && scriptCount < 128 && totalScriptBytes <= 512 * 1024) {
+                        if (!skip && (!source.empty() || fetchBeforeRun) && scriptCount < 192 && totalScriptBytes <= 2 * 1024 * 1024) {
                             if (isDefer && !srcUrl.empty())
-                                deferred.push_back({ source, filename });
+                                deferred.push_back({ source, filename, fetchBeforeRun });
                             else
-                                g_js.runScript(source, filename);
+                                blocking.push_back({ source, filename, fetchBeforeRun });
                         }
                         ++scriptCount;
                     }
                     for (auto it = n->children.rbegin(); it != n->children.rend(); ++it)
                         stack.push_back(it->get());
                 }
-                // Run deferred scripts after all inline/blocking scripts.
-                for (auto& ds : deferred)
-                    g_js.runScript(ds.source, ds.filename);
-                g_js.dispatchDocumentEvent("DOMContentLoaded");
-                g_js.dispatchWindowEvent("load");
+                for (auto& script : blocking)
+                    g_pendingPageScripts.push_back({ idx, pageUrl, std::move(script.source), std::move(script.filename), false, script.fetchBeforeRun });
+                for (auto& script : deferred)
+                    g_pendingPageScripts.push_back({ idx, pageUrl, std::move(script.source), std::move(script.filename), false, script.fetchBeforeRun });
+                g_pendingPageScripts.push_back({ idx, pageUrl, {}, "__helix_load_events__", true, false });
                 // Set up timer for macrotasks / setTimeout
                 SetTimer(hwnd, 1, 16, NULL);
             } catch (...) {
@@ -1172,7 +1234,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 static DWORD lastHoverTick = 0;
                 DWORD now = GetTickCount();
                 if (now - lastHoverTick >= 33) { // ~30Hz
-                    const Node* hover = FormState::hitTestNode(*g_renderer.GetLayoutRoot(),
+                    const Node* hover = g_renderer.HoverNodeAt(
                         (float)px, (float)py, CurTab().scrollY, (float)TOP_INSET);
                     if (hover != g_hoverNode) {
                         g_hoverNode = hover;
@@ -1219,6 +1281,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (DrainResourceCompletions() > 0) {
             InvalidateContent();
         }
+        RunPendingPageScripts(hwnd);
         try {
             g_js.runMacrotasks();
         } catch (...) {
@@ -1230,7 +1293,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd, &rc);
             rc.bottom = TOP_INSET;
             InvalidateRect(hwnd, &rc, FALSE);
-        } else if (!g_js.hasPendingMacrotasks() && !HasPendingResourceCompletions()) {
+        } else if (g_pendingPageScripts.empty() && !g_js.hasPendingMacrotasks() && !HasPendingResourceCompletions()) {
             KillTimer(hwnd, 1);
         }
         return 0;

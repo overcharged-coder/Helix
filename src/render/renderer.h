@@ -53,6 +53,7 @@ public:
                 bool repaintChrome = true);
 
     std::string HitTest(float x, float y) const;
+    const Node* HoverNodeAt(float x, float y, float scrollY, float topInset) const;
     int  HitTestTab(float x, float y) const;
     bool HitTestTabClose(float x, float y, int& outIdx) const;
     bool GetAnchorY(const std::string& anchor, float& outY) const;
@@ -122,6 +123,9 @@ private:
     mutable bool m_lastHitValid = false;
     mutable HitRegion m_lastHitRegion;
     mutable std::string m_lastHitHref;
+    mutable bool m_lastHoverNodeValid = false;
+    mutable HitRegion m_lastHoverNodeRegion;
+    mutable const Node* m_lastHoverNode = nullptr;
     std::map<std::string, float> m_anchorY;
 
     struct TabHit { float x, y, w, h; int idx; bool isClose; };

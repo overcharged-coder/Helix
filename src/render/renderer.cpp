@@ -226,6 +226,8 @@ void Renderer::Resize(UINT w, UINT h) {
 void Renderer::InvalidateLayout() {
     m_layoutRoot.reset();
     m_layoutDocKey = nullptr;
+    m_lastHoverNodeValid = false;
+    m_lastHoverNode = nullptr;
     m_styleDocKey = nullptr;
     m_styleBaseUrlKey.clear();
     m_cachedSheet = Stylesheet{};
@@ -597,6 +599,8 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
             m_lastTimings.layoutReused = reuse;
             if (!reuse) {
                 auto layoutStart = std::chrono::steady_clock::now();
+                m_lastHoverNodeValid = false;
+                m_lastHoverNode = nullptr;
                 LayoutInput in;
                 in.document  = doc.get();
                 in.sheet     = sheet;
@@ -680,6 +684,61 @@ std::string Renderer::HitTest(float x, float y) const {
     m_lastHitValid = false;
     m_lastHitHref.clear();
     return {};
+}
+
+const Node* Renderer::HoverNodeAt(float x, float y, float scrollY, float topInset) const {
+    if (!m_layoutRoot) return nullptr;
+    const float docY = y + scrollY - topInset;
+    if (m_lastHoverNodeValid
+        && x >= m_lastHoverNodeRegion.x && x <= m_lastHoverNodeRegion.x + m_lastHoverNodeRegion.w
+        && docY >= m_lastHoverNodeRegion.y && docY <= m_lastHoverNodeRegion.y + m_lastHoverNodeRegion.h) {
+        return m_lastHoverNode;
+    }
+
+    const LayoutBox* found = nullptr;
+    std::vector<const LayoutBox*> stack;
+    stack.push_back(m_layoutRoot.get());
+    while (!stack.empty()) {
+        const LayoutBox* box = stack.back();
+        stack.pop_back();
+        if (!box) continue;
+        const float bw = box->borderBoxW();
+        const float bh = box->borderBoxH();
+        const bool inside = x >= box->x && x <= box->x + bw
+                         && docY >= box->y && docY <= box->y + bh;
+        if (inside && box->node && box->node->type == NodeType::Element)
+            found = box;
+        if (inside || box == m_layoutRoot.get()) {
+            for (auto it = box->kids.rbegin(); it != box->kids.rend(); ++it)
+                stack.push_back(it->get());
+        } else if (!box->style.overflowHidden) {
+            for (auto it = box->kids.rbegin(); it != box->kids.rend(); ++it) {
+                const LayoutBox* kid = it->get();
+                if (kid->isOutOfFlow() || kid->isFloat() || kid->style.positionMode == 1)
+                    stack.push_back(kid);
+            }
+        }
+    }
+
+    if (!found) {
+        m_lastHoverNodeValid = false;
+        m_lastHoverNode = nullptr;
+        return nullptr;
+    }
+
+    const float w = found->borderBoxW();
+    const float h = found->borderBoxH();
+    const float area = std::max(0.f, w) * std::max(0.f, h);
+    const bool compactEnough = area <= 40000.f || found->isInlineLevel() || !found->href.empty();
+    if (compactEnough) {
+        m_lastHoverNodeRegion = { found->x, found->y, w, h, {} };
+        m_lastHoverNode = found->node;
+        m_lastHoverNodeValid = true;
+    } else {
+        m_lastHoverNodeValid = false;
+        m_lastHoverNode = nullptr;
+    }
+    return found->node;
 }
 
 bool Renderer::GetAnchorY(const std::string& anchor, float& outY) const {

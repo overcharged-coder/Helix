@@ -6,7 +6,7 @@
 #include <string>
 
 struct JsScriptBudget {
-    size_t maxScriptBytes = 256 * 1024;
+    size_t maxScriptBytes = 1024 * 1024;
 };
 
 struct JsScriptStats {

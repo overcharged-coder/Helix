@@ -1,4 +1,4 @@
-#define _USE_MATH_DEFINES
+﻿#define _USE_MATH_DEFINES
 #include "js/runtime.h"
 #include <cmath>
 #include <cstring>
@@ -8,8 +8,9 @@
 #include <random>
 #include <regex>
 #include <cstdio>
+#include <memory>
 
-// ── Helper macros ─────────────────────────────────────────────────────────────
+// â”€â”€ Helper macros â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #define NATIVE(name) [](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue
 #define ARG(i) (args.size() > (size_t)(i) ? args[i] : JsValue::undefined())
@@ -23,7 +24,7 @@ static JsValue addNative(VM& vm, JsObject* obj, const std::string& name, NativeF
     return JsValue::object(fnObj);
 }
 
-// ── Object.prototype methods ──────────────────────────────────────────────────
+// â”€â”€ Object.prototype methods â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerObject(VM& vm) {
     auto* ctor  = vm.gc().newNativeFunction(NATIVE("Object") {
@@ -139,7 +140,7 @@ static void registerObject(VM& vm) {
     vm.setGlobal("Object", JsValue::object(ctor));
 }
 
-// ── Array ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Array â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerArray(VM& vm) {
     auto* proto = vm.gc().newObject(ObjKind::Plain);
@@ -473,7 +474,7 @@ static void registerArray(VM& vm) {
     vm.setGlobal("Array", JsValue::object(ctor));
 }
 
-// ── String ────────────────────────────────────────────────────────────────────
+// â”€â”€ String â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static std::string getStr(JsValue v) {
     if (v.isString()) return v.asString()->value;
@@ -709,7 +710,7 @@ static void registerString(VM& vm) {
     vm.setGlobal("String", JsValue::object(ctor));
 }
 
-// ── Number ────────────────────────────────────────────────────────────────────
+// â”€â”€ Number â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerNumber(VM& vm) {
     auto* proto = vm.gc().newObject(ObjKind::Plain);
@@ -762,7 +763,7 @@ static void registerNumber(VM& vm) {
     vm.setGlobal("Number", JsValue::object(ctor));
 }
 
-// ── Boolean ───────────────────────────────────────────────────────────────────
+// â”€â”€ Boolean â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerBoolean(VM& vm) {
     auto* ctor = vm.gc().newNativeFunction(NATIVE("Boolean") {
@@ -771,7 +772,7 @@ static void registerBoolean(VM& vm) {
     vm.setGlobal("Boolean", JsValue::object(ctor));
 }
 
-// ── Math ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Math â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerMath(VM& vm) {
     auto* math = vm.gc().newObject(ObjKind::Plain);
@@ -836,7 +837,7 @@ static void registerMath(VM& vm) {
     vm.setGlobal("Math", JsValue::object(math));
 }
 
-// ── JSON ──────────────────────────────────────────────────────────────────────
+// â”€â”€ JSON â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static std::string jsonStringify(JsValue val, int indent = 0, int depth = 0) {
     if (val.isUndefined() || val.tag == JsTag::Object && val.isCallable()) return "";
@@ -954,18 +955,20 @@ static void registerJSON(VM& vm) {
     vm.setGlobal("JSON", JsValue::object(json));
 }
 
-// ── Promise ───────────────────────────────────────────────────────────────────
+// â”€â”€ Promise â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerPromise(VM& vm) {
     auto* ctor = vm.gc().newNativeFunction(NATIVE("Promise") {
         auto* p = vm.gc().newPromise();
+        vm.initPromiseObject(p);
         JsValue pVal = JsValue::object(p);
         if (ARG(0).isCallable()) {
-            auto* resolveFn = vm.gc().newNativeFunction(NATIVE("resolve") {
-                // The promise ref is captured via closure — simplified
+            auto* resolveFn = vm.gc().newNativeFunction([p](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+                vm.settlePromiseObject(p, args.empty() ? JsValue::undefined() : args[0], false);
                 return JsValue::undefined();
             }, "resolve");
-            auto* rejectFn = vm.gc().newNativeFunction(NATIVE("reject") {
+            auto* rejectFn = vm.gc().newNativeFunction([p](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+                vm.settlePromiseObject(p, args.empty() ? JsValue::undefined() : args[0], true);
                 return JsValue::undefined();
             }, "reject");
             try {
@@ -974,36 +977,129 @@ static void registerPromise(VM& vm) {
                 vm.rejectPromise(p, ex.val);
             }
         }
-        addNative(vm, p, "then", NATIVE("then") {
-            auto* nextP = vm.gc().newPromise();
-            vm.promiseThen(thisVal.asObject(), ARG(0), ARG(1));
-            return JsValue::object(nextP);
-        });
-        addNative(vm, p, "catch", NATIVE("catch") {
-            vm.promiseThen(thisVal.asObject(), JsValue::undefined(), ARG(0));
-            return thisVal;
-        });
-        addNative(vm, p, "finally", NATIVE("finally") {
-            vm.promiseThen(thisVal.asObject(), ARG(0), ARG(0));
-            return thisVal;
-        });
         return pVal;
     }, "Promise");
     addNative(vm, ctor, "resolve", NATIVE("Promise.resolve") { return vm.promiseResolve(ARG(0)); });
     addNative(vm, ctor, "reject",  NATIVE("Promise.reject")  { return vm.promiseReject(ARG(0)); });
     addNative(vm, ctor, "all", NATIVE("Promise.all") {
-        return vm.promiseResolve(ARG(0)); // simplified
+        auto* out = vm.gc().newPromise();
+        vm.initPromiseObject(out);
+        JsValue iterable = ARG(0);
+        if (!iterable.isObject() || iterable.asObject()->kind != ObjKind::Array) {
+            vm.resolvePromise(out, iterable);
+            return JsValue::object(out);
+        }
+        auto* source = iterable.asObject();
+        auto* values = vm.gc().newArray();
+        uint32_t len = source->arrayLength();
+        if (len == 0) {
+            vm.resolvePromise(out, JsValue::object(values));
+            return JsValue::object(out);
+        }
+        auto remaining = std::make_shared<uint32_t>(len);
+        for (uint32_t i = 0; i < len; ++i) {
+            values->arraySet(i, JsValue::undefined());
+            JsValue item = source->arrayGet(i);
+            auto fulfill = JsValue::object(vm.gc().newNativeFunction(
+                [out, values, remaining, i](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                    values->arraySet(i, a.empty() ? JsValue::undefined() : a[0]);
+                    if (*remaining > 0 && --(*remaining) == 0)
+                        v.resolvePromise(out, JsValue::object(values));
+                    return JsValue::undefined();
+                }, "Promise.all.fulfill"));
+            auto reject = JsValue::object(vm.gc().newNativeFunction(
+                [out](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                    v.rejectPromise(out, a.empty() ? JsValue::undefined() : a[0]);
+                    return JsValue::undefined();
+                }, "Promise.all.reject"));
+            if (item.isObject() && item.asObject()->kind == ObjKind::Promise)
+                vm.promiseThen(item.asObject(), fulfill, reject);
+            else {
+                values->arraySet(i, item);
+                if (*remaining > 0 && --(*remaining) == 0)
+                    vm.resolvePromise(out, JsValue::object(values));
+            }
+        }
+        return JsValue::object(out);
     });
     addNative(vm, ctor, "allSettled", NATIVE("Promise.allSettled") {
-        return vm.promiseResolve(ARG(0));
+        auto* out = vm.gc().newPromise();
+        vm.initPromiseObject(out);
+        JsValue iterable = ARG(0);
+        if (!iterable.isObject() || iterable.asObject()->kind != ObjKind::Array) {
+            vm.resolvePromise(out, iterable);
+            return JsValue::object(out);
+        }
+        auto* source = iterable.asObject();
+        auto* values = vm.gc().newArray();
+        uint32_t len = source->arrayLength();
+        if (len == 0) {
+            vm.resolvePromise(out, JsValue::object(values));
+            return JsValue::object(out);
+        }
+        auto remaining = std::make_shared<uint32_t>(len);
+        auto settleOne = [out, values, remaining](VM& v, uint32_t i, JsValue value, bool rejected) {
+            auto* record = v.gc().newObject(ObjKind::Plain);
+            record->setProp("status", v.str(rejected ? "rejected" : "fulfilled"));
+            record->setProp(rejected ? "reason" : "value", value);
+            values->arraySet(i, JsValue::object(record));
+            if (*remaining > 0 && --(*remaining) == 0)
+                v.resolvePromise(out, JsValue::object(values));
+        };
+        for (uint32_t i = 0; i < len; ++i) {
+            values->arraySet(i, JsValue::undefined());
+            JsValue item = source->arrayGet(i);
+            auto fulfill = JsValue::object(vm.gc().newNativeFunction(
+                [settleOne, i](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                    settleOne(v, i, a.empty() ? JsValue::undefined() : a[0], false);
+                    return JsValue::undefined();
+                }, "Promise.allSettled.fulfill"));
+            auto reject = JsValue::object(vm.gc().newNativeFunction(
+                [settleOne, i](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                    settleOne(v, i, a.empty() ? JsValue::undefined() : a[0], true);
+                    return JsValue::undefined();
+                }, "Promise.allSettled.reject"));
+            if (item.isObject() && item.asObject()->kind == ObjKind::Promise)
+                vm.promiseThen(item.asObject(), fulfill, reject);
+            else
+                settleOne(vm, i, item, false);
+        }
+        return JsValue::object(out);
     });
     addNative(vm, ctor, "race", NATIVE("Promise.race") {
-        return vm.promiseResolve(ARG(0));
+        auto* out = vm.gc().newPromise();
+        vm.initPromiseObject(out);
+        JsValue iterable = ARG(0);
+        if (!iterable.isObject() || iterable.asObject()->kind != ObjKind::Array) {
+            vm.resolvePromise(out, iterable);
+            return JsValue::object(out);
+        }
+        auto* source = iterable.asObject();
+        for (uint32_t i = 0; i < source->arrayLength(); ++i) {
+            JsValue item = source->arrayGet(i);
+            if (item.isObject() && item.asObject()->kind == ObjKind::Promise) {
+                auto fulfill = JsValue::object(vm.gc().newNativeFunction(
+                    [out](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                        v.resolvePromise(out, a.empty() ? JsValue::undefined() : a[0]);
+                        return JsValue::undefined();
+                    }, "Promise.race.fulfill"));
+                auto reject = JsValue::object(vm.gc().newNativeFunction(
+                    [out](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
+                        v.rejectPromise(out, a.empty() ? JsValue::undefined() : a[0]);
+                        return JsValue::undefined();
+                    }, "Promise.race.reject"));
+                vm.promiseThen(item.asObject(), fulfill, reject);
+            } else {
+                vm.resolvePromise(out, item);
+                break;
+            }
+        }
+        return JsValue::object(out);
     });
     vm.setGlobal("Promise", JsValue::object(ctor));
 }
 
-// ── console ───────────────────────────────────────────────────────────────────
+// â”€â”€ console â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerConsole(VM& vm) {
     auto* console = vm.gc().newObject(ObjKind::Plain);
@@ -1034,7 +1130,7 @@ static void registerConsole(VM& vm) {
     vm.setGlobal("console", JsValue::object(console));
 }
 
-// ── Timers ────────────────────────────────────────────────────────────────────
+// â”€â”€ Timers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerTimers(VM& vm) {
     vm.setGlobal("setTimeout", JsValue::object(vm.gc().newNativeFunction(NATIVE("setTimeout") {
@@ -1069,7 +1165,7 @@ static void registerTimers(VM& vm) {
     }, "queueMicrotask")));
 }
 
-// ── Global helpers ────────────────────────────────────────────────────────────
+// â”€â”€ Global helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerGlobals(VM& vm) {
     vm.setGlobal("undefined", JsValue::undefined());
@@ -1141,7 +1237,7 @@ static void registerGlobals(VM& vm) {
     makeErrCtor("EvalError");
 }
 
-// ── Map / Set ─────────────────────────────────────────────────────────────────
+// â”€â”€ Map / Set â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerMapSet(VM& vm) {
     // Map
@@ -1190,13 +1286,13 @@ static void registerMapSet(VM& vm) {
     }, "Set");
     vm.setGlobal("Set", JsValue::object(setCtor));
 
-    // WeakMap / WeakSet — simplified (same as Map/Set)
+    // WeakMap / WeakSet â€” simplified (same as Map/Set)
     vm.setGlobal("WeakMap", vm.getGlobal("Map"));
     vm.setGlobal("WeakSet", vm.getGlobal("Set"));
     vm.setGlobal("WeakRef", vm.getGlobal("Map"));
 }
 
-// ── Date ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Date â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerDate(VM& vm) {
     auto* dateCtor = vm.gc().newNativeFunction(NATIVE("Date") {
@@ -1219,7 +1315,7 @@ static void registerDate(VM& vm) {
     vm.setGlobal("Date", JsValue::object(dateCtor));
 }
 
-// ── RegExp ────────────────────────────────────────────────────────────────────
+// â”€â”€ RegExp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void registerRegExp(VM& vm) {
     auto* ctor = vm.gc().newNativeFunction(NATIVE("RegExp") {
@@ -1271,7 +1367,7 @@ static void registerRegExp(VM& vm) {
     vm.setGlobal("RegExp", JsValue::object(ctor));
 }
 
-// ── Top-level entry ───────────────────────────────────────────────────────────
+// â”€â”€ Top-level entry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 void registerBuiltins(VM& vm) {
     registerGlobals(vm);
