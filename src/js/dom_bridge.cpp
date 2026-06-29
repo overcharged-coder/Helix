@@ -3,7 +3,9 @@
 #include "html/parser.h"
 #include "network/fetcher.h"
 #include "network/cookies.h"
+#include "network/url.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <map>
 #include <sstream>
@@ -48,6 +50,7 @@ static std::unordered_map<Node*, JsObject*> g_wrapperStore;
 // Event listeners: node -> [(eventName, callbackFn), ...]
 struct EventListener { std::string event; JsValue fn; };
 static std::unordered_map<Node*, std::vector<EventListener>> g_eventListeners;
+static std::vector<EventListener> g_windowEventListeners;
 // Persistent GC roots for cached DOM wrappers. These live at STABLE heap
 // addresses so the GC can mark them safely (rooting a stack local was a
 // use-after-return bug). Cleared per document in registerDom().
@@ -305,6 +308,22 @@ static void notifyMutationObservers(VM& vm, Node* target, const std::string& typ
 }
 
 static bool g_domDirtyCoalesced = false;
+static DomBridgeCallbacks g_domCallbacks;
+static float g_windowScrollX = 0.f;
+static float g_windowScrollY = 0.f;
+
+static void syncWindowScrollGlobals(VM& vm) {
+    vm.setGlobal("pageXOffset", JsValue::integer((int32_t)std::round(g_windowScrollX)));
+    vm.setGlobal("pageYOffset", JsValue::integer((int32_t)std::round(g_windowScrollY)));
+    vm.setGlobal("scrollX",     JsValue::integer((int32_t)std::round(g_windowScrollX)));
+    vm.setGlobal("scrollY",     JsValue::integer((int32_t)std::round(g_windowScrollY)));
+}
+
+static void setWindowScrollTo(VM& vm, float x, float y) {
+    g_windowScrollX = std::max(0.f, x);
+    g_windowScrollY = std::max(0.f, y);
+    syncWindowScrollGlobals(vm);
+}
 
 void notifyDomDirtyCoalesced(VM& vm) {
     vm.domDirty = true;
@@ -364,7 +383,305 @@ static std::string innerHTML(VM& vm, Node* n) {
     return s;
 }
 
-// Forward declared free function for querySelector
+static bool isIdentChar(char c) {
+    unsigned char uc = static_cast<unsigned char>(c);
+    return std::isalnum(uc) || c == '_' || c == '-' || c == '\\';
+}
+
+static std::string stripQuotes(std::string s) {
+    s = trimCopy(std::move(s));
+    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"')
+        || (s.front() == '\'' && s.back() == '\''))) {
+        return s.substr(1, s.size() - 2);
+    }
+    return s;
+}
+
+static std::vector<std::string> splitSelectorTopLevel(const std::string& input, char delimiter) {
+    std::vector<std::string> out;
+    std::string cur;
+    int bracket = 0, paren = 0;
+    char quote = 0;
+    for (char c : input) {
+        if (quote) {
+            cur += c;
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
+        if (c == '[') bracket++;
+        else if (c == ']') bracket = std::max(0, bracket - 1);
+        else if (c == '(') paren++;
+        else if (c == ')') paren = std::max(0, paren - 1);
+        if (c == delimiter && bracket == 0 && paren == 0) {
+            std::string part = trimCopy(cur);
+            if (!part.empty()) out.push_back(part);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    std::string part = trimCopy(cur);
+    if (!part.empty()) out.push_back(part);
+    return out;
+}
+
+struct SelectorPart {
+    std::string simple;
+    char combinatorBefore = 0;
+};
+
+static std::vector<SelectorPart> parseSelectorParts(const std::string& selector) {
+    std::vector<SelectorPart> parts;
+    std::string cur;
+    int bracket = 0, paren = 0;
+    char quote = 0;
+    char pendingCombinator = 0;
+
+    auto flush = [&]() {
+        std::string simple = trimCopy(cur);
+        if (!simple.empty()) {
+            parts.push_back({ simple, parts.empty() ? 0 : (pendingCombinator ? pendingCombinator : ' ') });
+            cur.clear();
+            pendingCombinator = ' ';
+        }
+    };
+
+    for (size_t i = 0; i < selector.size(); ++i) {
+        char c = selector[i];
+        if (quote) {
+            cur += c;
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
+        if (c == '[') { bracket++; cur += c; continue; }
+        if (c == ']') { bracket = std::max(0, bracket - 1); cur += c; continue; }
+        if (c == '(') { paren++; cur += c; continue; }
+        if (c == ')') { paren = std::max(0, paren - 1); cur += c; continue; }
+
+        if (bracket == 0 && paren == 0 && (c == '>' || c == '+' || c == '~')) {
+            flush();
+            pendingCombinator = c;
+            while (i + 1 < selector.size()
+                && std::isspace(static_cast<unsigned char>(selector[i + 1]))) ++i;
+            continue;
+        }
+        if (bracket == 0 && paren == 0 && std::isspace(static_cast<unsigned char>(c))) {
+            flush();
+            if (pendingCombinator == 0) pendingCombinator = ' ';
+            continue;
+        }
+        cur += c;
+    }
+    flush();
+    return parts;
+}
+
+static bool hasClassToken(const Node* n, const std::string& cls) {
+    if (!n || cls.empty()) return false;
+    return classHas(classTokens(n->attr("class")), cls);
+}
+
+static std::vector<Node*> elementSiblings(const Node* n) {
+    std::vector<Node*> out;
+    if (!n || !n->parent) return out;
+    for (const auto& child : n->parent->children)
+        if (child && child->type == NodeType::Element)
+            out.push_back(child.get());
+    return out;
+}
+
+static Node* previousElementSibling(const Node* n) {
+    Node* prev = nullptr;
+    for (Node* sibling : elementSiblings(n)) {
+        if (sibling == n) return prev;
+        prev = sibling;
+    }
+    return nullptr;
+}
+
+static bool attrMatches(const Node* n, const std::string& raw) {
+    std::string expr = trimCopy(raw);
+    if (expr.empty()) return false;
+    std::istringstream ss(expr);
+    std::string first;
+    ss >> first;
+    expr = first.empty() ? expr : first;
+
+    const std::vector<std::string> ops = { "~=", "|=", "^=", "$=", "*=", "=" };
+    std::string name, op, value;
+    size_t pos = std::string::npos;
+    for (const auto& candidate : ops) {
+        pos = expr.find(candidate);
+        if (pos != std::string::npos) {
+            op = candidate;
+            name = trimCopy(expr.substr(0, pos));
+            value = stripQuotes(expr.substr(pos + candidate.size()));
+            break;
+        }
+    }
+    if (op.empty()) name = trimCopy(expr);
+    if (name.empty() || !hasAttr(n, name)) return false;
+    if (op.empty()) return true;
+
+    std::string actual = n->attr(name);
+    if (op == "=") return actual == value;
+    if (op == "^=") return actual.rfind(value, 0) == 0;
+    if (op == "$=") return actual.size() >= value.size()
+        && actual.compare(actual.size() - value.size(), value.size(), value) == 0;
+    if (op == "*=") return actual.find(value) != std::string::npos;
+    if (op == "~=") return classHas(classTokens(actual), value);
+    if (op == "|=") return actual == value || actual.rfind(value + "-", 0) == 0;
+    return false;
+}
+
+static bool matchesSelector(Node* n, const std::string& selector, Node* scope);
+
+static bool matchesPseudo(Node* n, const std::string& name, const std::string& arg, Node* scope) {
+    if (!n) return false;
+    if (name == "not") return !matchesSelector(n, arg, scope);
+    if (name == "is" || name == "where") return matchesSelector(n, arg, scope);
+    if (name == "checked") return hasAttr(n, "checked") || hasAttr(n, "selected");
+    if (name == "disabled") return hasAttr(n, "disabled");
+    if (name == "enabled") return !hasAttr(n, "disabled");
+    if (name == "empty") {
+        for (const auto& child : n->children) {
+            if (!child) continue;
+            if (child->type == NodeType::Element) return false;
+            if (child->type == NodeType::Text && !trimCopy(child->text).empty()) return false;
+        }
+        return true;
+    }
+    if (name == "first-child" || name == "last-child" || name == "only-child") {
+        auto siblings = elementSiblings(n);
+        if (siblings.empty()) return false;
+        if (name == "first-child") return siblings.front() == n;
+        if (name == "last-child") return siblings.back() == n;
+        return siblings.size() == 1 && siblings.front() == n;
+    }
+    if (name == "root") return n->parent && n->parent->type == NodeType::Document;
+    if (name == "scope") return n == scope;
+    return false;
+}
+
+static bool matchesSimpleSelector(Node* n, const std::string& simple, Node* scope) {
+    if (!n || n->type != NodeType::Element) return false;
+    size_t i = 0;
+    bool sawAnySelector = false;
+    while (i < simple.size()) {
+        char c = simple[i];
+        if (std::isspace(static_cast<unsigned char>(c))) { ++i; continue; }
+        if (c == '*') { sawAnySelector = true; ++i; continue; }
+        if (c == '#') {
+            ++i;
+            size_t start = i;
+            while (i < simple.size() && isIdentChar(simple[i])) ++i;
+            if (n->attr("id") != simple.substr(start, i - start)) return false;
+            sawAnySelector = true;
+            continue;
+        }
+        if (c == '.') {
+            ++i;
+            size_t start = i;
+            while (i < simple.size() && isIdentChar(simple[i])) ++i;
+            if (!hasClassToken(n, simple.substr(start, i - start))) return false;
+            sawAnySelector = true;
+            continue;
+        }
+        if (c == '[') {
+            int depth = 1;
+            size_t start = ++i;
+            char quote = 0;
+            while (i < simple.size() && depth > 0) {
+                char ac = simple[i];
+                if (quote) {
+                    if (ac == quote) quote = 0;
+                } else if (ac == '"' || ac == '\'') quote = ac;
+                else if (ac == '[') depth++;
+                else if (ac == ']') {
+                    if (--depth == 0) break;
+                }
+                ++i;
+            }
+            if (i >= simple.size() || !attrMatches(n, simple.substr(start, i - start))) return false;
+            ++i;
+            sawAnySelector = true;
+            continue;
+        }
+        if (c == ':') {
+            ++i;
+            size_t start = i;
+            while (i < simple.size() && isIdentChar(simple[i])) ++i;
+            std::string name = lowerCopy(simple.substr(start, i - start));
+            std::string arg;
+            if (i < simple.size() && simple[i] == '(') {
+                int depth = 1;
+                size_t argStart = ++i;
+                char quote = 0;
+                while (i < simple.size() && depth > 0) {
+                    char pc = simple[i];
+                    if (quote) {
+                        if (pc == quote) quote = 0;
+                    } else if (pc == '"' || pc == '\'') quote = pc;
+                    else if (pc == '(') depth++;
+                    else if (pc == ')') {
+                        if (--depth == 0) break;
+                    }
+                    ++i;
+                }
+                if (i >= simple.size()) return false;
+                arg = simple.substr(argStart, i - argStart);
+                ++i;
+            }
+            if (!matchesPseudo(n, name, arg, scope)) return false;
+            sawAnySelector = true;
+            continue;
+        }
+
+        size_t start = i;
+        while (i < simple.size() && isIdentChar(simple[i])) ++i;
+        if (start == i) return false;
+        std::string tag = lowerCopy(simple.substr(start, i - start));
+        if (tag != lowerCopy(n->tagName)) return false;
+        sawAnySelector = true;
+    }
+    return sawAnySelector;
+}
+
+static bool matchesSelectorParts(Node* n, const std::vector<SelectorPart>& parts, int index, Node* scope) {
+    if (index < 0) return true;
+    if (!matchesSimpleSelector(n, parts[(size_t)index].simple, scope)) return false;
+    if (index == 0) return true;
+
+    char combinator = parts[(size_t)index].combinatorBefore;
+    if (combinator == '>') {
+        return n->parent && matchesSelectorParts(n->parent, parts, index - 1, scope);
+    }
+    if (combinator == '+') {
+        Node* prev = previousElementSibling(n);
+        return prev && matchesSelectorParts(prev, parts, index - 1, scope);
+    }
+    if (combinator == '~') {
+        for (Node* prev = previousElementSibling(n); prev; prev = previousElementSibling(prev))
+            if (matchesSelectorParts(prev, parts, index - 1, scope)) return true;
+        return false;
+    }
+
+    for (Node* cur = n->parent; cur; cur = cur->parent)
+        if (matchesSelectorParts(cur, parts, index - 1, scope)) return true;
+    return false;
+}
+
+static bool matchesSelector(Node* n, const std::string& selector, Node* scope) {
+    for (const auto& group : splitSelectorTopLevel(selector, ',')) {
+        auto parts = parseSelectorParts(group);
+        if (!parts.empty() && matchesSelectorParts(n, parts, (int)parts.size() - 1, scope))
+            return true;
+    }
+    return false;
+}
+
 static std::vector<std::shared_ptr<Node>> domQueryAll(Node* root, const std::string& sel) {
     std::vector<std::shared_ptr<Node>> result;
     size_t visited = 0;
@@ -373,11 +690,7 @@ static std::vector<std::shared_ptr<Node>> domQueryAll(Node* root, const std::str
         if (++depth > 1000) { --depth; return; }   // guard against deep/cyclic trees
         for (auto& c : n->children) {
             if (++visited > 200000) break;          // guard against runaway traversal
-            bool match = false;
-            if (!sel.empty() && sel[0]=='#') match = (c->attr("id") == sel.substr(1));
-            else if (!sel.empty() && sel[0]=='.') match = (c->attr("class").find(sel.substr(1)) != std::string::npos);
-            else match = (c->tagName == sel);
-            if (match) result.push_back(c);
+            if (matchesSelector(c.get(), sel, root)) result.push_back(c);
             walk(c.get());
         }
         --depth;
@@ -820,12 +1133,7 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
     addNativeM("matches", NATIVE("matches") {
         Node* n = unwrapNode(thisVal);
         if (!n || args.empty()) return JsValue::boolean(false);
-        std::string sel = ARG_STR(0);
-        bool match = false;
-        if (!sel.empty() && sel[0]=='#') match = (n->attr("id") == sel.substr(1));
-        else if (!sel.empty() && sel[0]=='.') match = (n->attr("class").find(sel.substr(1)) != std::string::npos);
-        else match = (n->tagName == sel);
-        return JsValue::boolean(match);
+        return JsValue::boolean(matchesSelector(n, ARG_STR(0), n));
     });
     addNativeM("closest", NATIVE("closest") {
         Node* n = unwrapNode(thisVal);
@@ -833,11 +1141,7 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         std::string sel = ARG_STR(0);
         Node* cur = n;
         while (cur) {
-            bool match = false;
-            if (!sel.empty() && sel[0]=='#') match = (cur->attr("id") == sel.substr(1));
-            else if (!sel.empty() && sel[0]=='.') match = (cur->attr("class").find(sel.substr(1)) != std::string::npos);
-            else match = (cur->tagName == sel);
-            if (match) { auto s = getShared(cur); if (s) return wrapNode(vm, s); }
+            if (matchesSelector(cur, sel, n)) { auto s = getShared(cur); if (s) return wrapNode(vm, s); }
             cur = cur->parent;
         }
         return JsValue::null();
@@ -857,7 +1161,14 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         r->setProp("y",      JsValue::number(rect.top));
         return JsValue::object(r);
     });
-    addNativeM("scrollIntoView", NATIVE("scrollIntoView") { return JsValue::undefined(); });
+    addNativeM("scrollIntoView", NATIVE("scrollIntoView") {
+        Node* n = unwrapNode(thisVal);
+        if (!n) return JsValue::undefined();
+        DomMetrics rect = computeDomMetrics(n);
+        setWindowScrollTo(vm, g_windowScrollX, rect.top);
+        if (g_domCallbacks.scrollIntoView) g_domCallbacks.scrollIntoView(n);
+        return JsValue::undefined();
+    });
     addNativeM("focus",  NATIVE("focus")  {
         if (Node* n = unwrapNode(thisVal)) {
             SetCssFocusNode(n);
@@ -1007,10 +1318,94 @@ static void setInnerHtml(Node* parent, const std::string& html) {
     }
 }
 
+struct ParsedDomUrl {
+    std::string href;
+    std::string protocol;
+    std::string host;
+    std::string hostname;
+    std::string port;
+    std::string pathname = "/";
+    std::string search;
+    std::string hash;
+    std::string origin;
+};
+
+static std::string removeHash(const std::string& href) {
+    size_t hash = href.find('#');
+    return hash == std::string::npos ? href : href.substr(0, hash);
+}
+
+static std::string removeQueryAndHash(const std::string& href) {
+    size_t stop = href.find_first_of("?#");
+    return stop == std::string::npos ? href : href.substr(0, stop);
+}
+
+static std::string resolveDomUrl(const std::string& href, const std::string& base) {
+    if (href.empty()) return base;
+    if (href[0] == '#') return removeHash(base) + href;
+    if (href[0] == '?') return removeQueryAndHash(base) + href;
+    return ResolveUrlAgainstBase(href, base);
+}
+
+static ParsedDomUrl parseDomUrl(const std::string& href) {
+    ParsedDomUrl out;
+    out.href = href;
+    size_t scheme = href.find("://");
+    if (scheme == std::string::npos) return out;
+
+    out.protocol = href.substr(0, scheme + 1);
+    size_t hostStart = scheme + 3;
+    size_t hostEnd = href.find_first_of("/?#", hostStart);
+    out.host = href.substr(hostStart,
+        hostEnd == std::string::npos ? std::string::npos : hostEnd - hostStart);
+    out.hostname = out.host;
+    size_t colon = out.host.rfind(':');
+    if (colon != std::string::npos && out.host.find(']') == std::string::npos) {
+        out.hostname = out.host.substr(0, colon);
+        out.port = out.host.substr(colon + 1);
+    }
+    out.origin = href.substr(0, scheme + 3) + out.host;
+
+    if (hostEnd != std::string::npos && href[hostEnd] == '/') {
+        size_t qmark = href.find('?', hostEnd);
+        size_t hashMark = href.find('#', hostEnd);
+        size_t pathEnd = std::min(qmark, hashMark);
+        out.pathname = href.substr(hostEnd,
+            pathEnd != std::string::npos ? pathEnd - hostEnd : std::string::npos);
+    }
+    size_t qmark = href.find('?', hostEnd == std::string::npos ? hostStart : hostEnd);
+    size_t hashMark = href.find('#', hostEnd == std::string::npos ? hostStart : hostEnd);
+    if (qmark != std::string::npos) {
+        size_t searchEnd = (hashMark != std::string::npos && hashMark > qmark)
+            ? hashMark : std::string::npos;
+        out.search = href.substr(qmark,
+            searchEnd != std::string::npos ? searchEnd - qmark : std::string::npos);
+    }
+    if (hashMark != std::string::npos) out.hash = href.substr(hashMark);
+    return out;
+}
+
+static void applyLocationProps(VM& vm, JsObject* loc, const std::string& href) {
+    ParsedDomUrl parsed = parseDomUrl(href);
+    loc->setProp("href",     vm.str(parsed.href));
+    loc->setProp("protocol", vm.str(parsed.protocol));
+    loc->setProp("host",     vm.str(parsed.host));
+    loc->setProp("hostname", vm.str(parsed.hostname));
+    loc->setProp("pathname", vm.str(parsed.pathname));
+    loc->setProp("search",   vm.str(parsed.search));
+    loc->setProp("hash",     vm.str(parsed.hash));
+    loc->setProp("origin",   vm.str(parsed.origin));
+    loc->setProp("port",     vm.str(parsed.port));
+}
+
 void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                  std::function<void()> onRepaint,
-                 const std::string& pageUrl) {
+                 const std::string& pageUrl,
+                 DomBridgeCallbacks callbacks) {
     vm.onDomDirty = onRepaint;
+    g_domCallbacks = std::move(callbacks);
+    g_windowScrollX = 0.f;
+    g_windowScrollY = 0.f;
 
     // Reflect live JS property writes onto the backing DOM node.
     vm.onDomPropSet = [vmPtr = &vm](JsObject* wrapper, const std::string& key, JsValue val) {
@@ -1064,6 +1459,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     g_wrapperRoots.clear();
     g_wrapperStore.clear();
     g_eventListeners.clear();
+    g_windowEventListeners.clear();
     for (auto& r : g_observerRoots) vm.gc().removeRoot(r.get());
     g_observerRoots.clear();
     g_mutationObservers.clear();
@@ -1105,48 +1501,104 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
 
     // window globals — populate location from the page URL.
     auto* winLocation = vm.gc().newObject(ObjKind::Plain);
-    {
-        std::string href = pageUrl, protocol, host, pathname = "/", search, hash, origin;
-        size_t scheme = href.find("://");
-        if (scheme != std::string::npos) {
-            protocol = href.substr(0, scheme + 1); // "https:"
-            size_t hostStart = scheme + 3;
-            size_t pathStart = href.find('/', hostStart);
-            host = (pathStart != std::string::npos) ? href.substr(hostStart, pathStart - hostStart) : href.substr(hostStart);
-            origin = href.substr(0, scheme + 3) + host;
-            if (pathStart != std::string::npos) {
-                size_t qmark = href.find('?', pathStart);
-                size_t hashMark = href.find('#', pathStart);
-                size_t pathEnd = std::min(qmark, hashMark);
-                pathname = href.substr(pathStart, pathEnd != std::string::npos ? pathEnd - pathStart : std::string::npos);
-                if (qmark != std::string::npos) {
-                    size_t searchEnd = (hashMark != std::string::npos && hashMark > qmark) ? hashMark : std::string::npos;
-                    search = href.substr(qmark, searchEnd != std::string::npos ? searchEnd - qmark : std::string::npos);
-                }
-                if (hashMark != std::string::npos) hash = href.substr(hashMark);
-            }
-        }
-        winLocation->setProp("href",     vm.str(href));
-        winLocation->setProp("protocol", vm.str(protocol));
-        winLocation->setProp("host",     vm.str(host));
-        winLocation->setProp("hostname", vm.str(host));
-        winLocation->setProp("pathname", vm.str(pathname));
-        winLocation->setProp("search",   vm.str(search));
-        winLocation->setProp("hash",     vm.str(hash));
-        winLocation->setProp("origin",   vm.str(origin));
-        winLocation->setProp("port",     vm.str(""));
-    }
-    addNative(vm, winLocation, "assign",  NATIVE("loc_assign")  { return JsValue::undefined(); });
-    addNative(vm, winLocation, "replace", NATIVE("loc_replace") { return JsValue::undefined(); });
-    addNative(vm, winLocation, "reload",  NATIVE("loc_reload")  { return JsValue::undefined(); });
+    auto* winHistory = vm.gc().newObject(ObjKind::Plain);
+    struct HistoryStack {
+        std::vector<std::string> entries;
+        size_t index = 0;
+    };
+    auto historyStack = std::make_shared<HistoryStack>();
+    historyStack->entries.push_back(pageUrl);
+
+    auto syncLocation = [winLocation, &vm](const std::string& href) {
+        applyLocationProps(vm, winLocation, href);
+    };
+    auto syncHistoryLength = [winHistory, historyStack]() {
+        winHistory->setProp("length", JsValue::integer((int32_t)historyStack->entries.size()));
+    };
+    syncLocation(pageUrl);
+    syncHistoryLength();
+    winHistory->setProp("state", JsValue::null());
+
+    addNative(vm, winLocation, "assign",
+        [historyStack, syncLocation, syncHistoryLength, baseUrl = pageUrl]
+        (VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+            std::string current = historyStack->entries.empty() ? baseUrl : historyStack->entries[historyStack->index];
+            std::string href = resolveDomUrl(args.empty() ? "" : args[0].toString(), current);
+            if (historyStack->index + 1 < historyStack->entries.size())
+                historyStack->entries.erase(historyStack->entries.begin() + historyStack->index + 1, historyStack->entries.end());
+            historyStack->entries.push_back(href);
+            historyStack->index = historyStack->entries.size() - 1;
+            syncLocation(href);
+            syncHistoryLength();
+            if (g_domCallbacks.navigate) g_domCallbacks.navigate(href, false);
+            return JsValue::undefined();
+        });
+    addNative(vm, winLocation, "replace",
+        [historyStack, syncLocation, syncHistoryLength, baseUrl = pageUrl]
+        (VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+            std::string current = historyStack->entries.empty() ? baseUrl : historyStack->entries[historyStack->index];
+            std::string href = resolveDomUrl(args.empty() ? "" : args[0].toString(), current);
+            if (historyStack->entries.empty()) historyStack->entries.push_back(href);
+            else historyStack->entries[historyStack->index] = href;
+            syncLocation(href);
+            syncHistoryLength();
+            if (g_domCallbacks.navigate) g_domCallbacks.navigate(href, true);
+            return JsValue::undefined();
+        });
+    addNative(vm, winLocation, "reload",
+        [historyStack, baseUrl = pageUrl](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+            std::string href = historyStack->entries.empty() ? baseUrl : historyStack->entries[historyStack->index];
+            if (g_domCallbacks.navigate) g_domCallbacks.navigate(href, true);
+            return JsValue::undefined();
+        });
     vm.setGlobal("location", JsValue::object(winLocation));
 
-    auto* winHistory = vm.gc().newObject(ObjKind::Plain);
-    winHistory->setProp("length", JsValue::integer(1));
-    addNative(vm, winHistory, "pushState",    NATIVE("pushState")    { return JsValue::undefined(); });
-    addNative(vm, winHistory, "replaceState", NATIVE("replaceState") { return JsValue::undefined(); });
-    addNative(vm, winHistory, "back",         NATIVE("back")         { return JsValue::undefined(); });
-    addNative(vm, winHistory, "forward",      NATIVE("forward")      { return JsValue::undefined(); });
+    addNative(vm, winHistory, "pushState",
+        [historyStack, syncLocation, syncHistoryLength, winHistory, baseUrl = pageUrl]
+        (VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+            std::string current = historyStack->entries.empty() ? baseUrl : historyStack->entries[historyStack->index];
+            std::string href = args.size() >= 3 && !args[2].isNullOrUndefined()
+                ? resolveDomUrl(args[2].toString(), current)
+                : current;
+            if (historyStack->index + 1 < historyStack->entries.size())
+                historyStack->entries.erase(historyStack->entries.begin() + historyStack->index + 1, historyStack->entries.end());
+            historyStack->entries.push_back(href);
+            historyStack->index = historyStack->entries.size() - 1;
+            winHistory->setProp("state", args.empty() ? JsValue::null() : args[0]);
+            syncLocation(href);
+            syncHistoryLength();
+            return JsValue::undefined();
+        });
+    addNative(vm, winHistory, "replaceState",
+        [historyStack, syncLocation, syncHistoryLength, winHistory, baseUrl = pageUrl]
+        (VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+            std::string current = historyStack->entries.empty() ? baseUrl : historyStack->entries[historyStack->index];
+            std::string href = args.size() >= 3 && !args[2].isNullOrUndefined()
+                ? resolveDomUrl(args[2].toString(), current)
+                : current;
+            if (historyStack->entries.empty()) historyStack->entries.push_back(href);
+            else historyStack->entries[historyStack->index] = href;
+            winHistory->setProp("state", args.empty() ? JsValue::null() : args[0]);
+            syncLocation(href);
+            syncHistoryLength();
+            return JsValue::undefined();
+        });
+    addNative(vm, winHistory, "back",
+        [historyStack, syncLocation](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+            if (historyStack->index > 0) {
+                historyStack->index--;
+                syncLocation(historyStack->entries[historyStack->index]);
+            }
+            return JsValue::undefined();
+        });
+    addNative(vm, winHistory, "forward",
+        [historyStack, syncLocation](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+            if (historyStack->index + 1 < historyStack->entries.size()) {
+                historyStack->index++;
+                syncLocation(historyStack->entries[historyStack->index]);
+            }
+            return JsValue::undefined();
+        });
     vm.setGlobal("history", JsValue::object(winHistory));
 
     auto* winNavigator = vm.gc().newObject(ObjKind::Plain);
@@ -1167,10 +1619,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
 
     vm.setGlobal("innerWidth",  JsValue::integer(1280));
     vm.setGlobal("innerHeight", JsValue::integer(800));
-    vm.setGlobal("pageXOffset", JsValue::integer(0));
-    vm.setGlobal("pageYOffset", JsValue::integer(0));
-    vm.setGlobal("scrollX",     JsValue::integer(0));
-    vm.setGlobal("scrollY",     JsValue::integer(0));
+    syncWindowScrollGlobals(vm);
     vm.setGlobal("devicePixelRatio", JsValue::number(1.0));
 
     // getComputedStyle(element): lightweight CSSOM from inline style + defaults.
@@ -1222,52 +1671,79 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             // .text() returns a resolved Promise with the body string.
             auto bodyStr = vm.str(body);
             addNative(vm, response, "text", [bodyStr](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
-                auto* p = v.gc().newObject(ObjKind::Plain);
-                JsValue resolved = bodyStr;
-                addNative(v, p, "then", [resolved](VM& v2, JsValue, std::vector<JsValue> a2) -> JsValue {
-                    if (!a2.empty() && a2[0].isCallable())
-                        return v2.call(a2[0], JsValue::undefined(), { resolved });
-                    return JsValue::undefined();
-                });
-                addNative(v, p, "catch", [](VM&, JsValue, std::vector<JsValue>) -> JsValue {
-                    return JsValue::undefined();
-                });
-                return JsValue::object(p);
+                return v.promiseResolve(bodyStr);
             });
             // .json() parses the body as JSON.
             addNative(vm, response, "json", [body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
                 JsValue jsonVal = v.getGlobal("JSON");
+                JsValue parsed = JsValue::undefined();
                 if (jsonVal.isObject()) {
                     JsValue parseFn = jsonVal.asObject()->getProp("parse");
                     if (parseFn.isCallable())
-                        return v.call(parseFn, jsonVal, { v.str(body) });
+                        parsed = v.call(parseFn, jsonVal, { v.str(body) });
                 }
-                return JsValue::undefined();
+                return v.promiseResolve(parsed);
             });
-            // Wrap in a thenable.
-            auto* promise = vm.gc().newObject(ObjKind::Plain);
-            JsValue respVal = JsValue::object(response);
-            addNative(vm, promise, "then", [respVal](VM& v, JsValue, std::vector<JsValue> a) -> JsValue {
-                if (!a.empty() && a[0].isCallable())
-                    return v.call(a[0], JsValue::undefined(), { respVal });
-                return JsValue::undefined();
-            });
-            addNative(vm, promise, "catch", NATIVE("fetch_catch") { return JsValue::undefined(); });
-            return JsValue::object(promise);
+            return vm.promiseResolve(JsValue::object(response));
         }, "fetch")));
 
-    // window.addEventListener / removeEventListener (no-ops for now)
+    // window.addEventListener / removeEventListener
     vm.setGlobal("addEventListener", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("win_addEventListener") { return JsValue::undefined(); }, "addEventListener")));
+        NATIVE("win_addEventListener") {
+            if (args.size() >= 2 && ARG(1).isCallable())
+                g_windowEventListeners.push_back({ ARG_STR(0), ARG(1) });
+            return JsValue::undefined();
+        }, "addEventListener")));
     vm.setGlobal("removeEventListener", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("win_removeEventListener") { return JsValue::undefined(); }, "removeEventListener")));
+        NATIVE("win_removeEventListener") {
+            if (args.size() < 2) return JsValue::undefined();
+            std::string eventName = ARG_STR(0);
+            JsValue fn = ARG(1);
+            auto it = std::find_if(g_windowEventListeners.begin(), g_windowEventListeners.end(),
+                [&](const EventListener& listener) {
+                    return listener.event == eventName && listener.fn.strictEq(fn);
+                });
+            if (it != g_windowEventListeners.end()) g_windowEventListeners.erase(it);
+            return JsValue::undefined();
+        }, "removeEventListener")));
 
     // window.scrollTo / scroll / open
     vm.setGlobal("scrollTo", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("scrollTo") { return JsValue::undefined(); }, "scrollTo")));
+        NATIVE("scrollTo") {
+            float x = 0.f, y = 0.f;
+            if (!args.empty() && args[0].isObject()) {
+                auto* options = args[0].asObject();
+                JsValue left = options->getProp("left");
+                JsValue top = options->getProp("top");
+                x = left.isUndefined() ? g_windowScrollX : (float)left.toNumber();
+                y = top.isUndefined() ? g_windowScrollY : (float)top.toNumber();
+            } else {
+                x = args.size() > 0 ? (float)ARG_NUM(0) : g_windowScrollX;
+                y = args.size() > 1 ? (float)ARG_NUM(1) : g_windowScrollY;
+            }
+            setWindowScrollTo(vm, x, y);
+            if (g_domCallbacks.scrollTo) g_domCallbacks.scrollTo(g_windowScrollX, g_windowScrollY);
+            return JsValue::undefined();
+        }, "scrollTo")));
     vm.setGlobal("scroll", vm.getGlobal("scrollTo"));
     vm.setGlobal("scrollBy", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("scrollBy") { return JsValue::undefined(); }, "scrollBy")));
+        NATIVE("scrollBy") {
+            float dx = 0.f, dy = 0.f;
+            if (!args.empty() && args[0].isObject()) {
+                auto* options = args[0].asObject();
+                JsValue left = options->getProp("left");
+                JsValue top = options->getProp("top");
+                dx = left.isUndefined() ? 0.f : (float)left.toNumber();
+                dy = top.isUndefined() ? 0.f : (float)top.toNumber();
+            } else {
+                dx = args.size() > 0 ? (float)ARG_NUM(0) : 0.f;
+                dy = args.size() > 1 ? (float)ARG_NUM(1) : 0.f;
+            }
+            setWindowScrollTo(vm, g_windowScrollX + dx, g_windowScrollY + dy);
+            if (g_domCallbacks.scrollBy) g_domCallbacks.scrollBy(dx, dy);
+            else if (g_domCallbacks.scrollTo) g_domCallbacks.scrollTo(g_windowScrollX, g_windowScrollY);
+            return JsValue::undefined();
+        }, "scrollBy")));
     vm.setGlobal("open", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("window_open") { return JsValue::null(); }, "open")));
     vm.setGlobal("close", JsValue::object(vm.gc().newNativeFunction(
@@ -1325,16 +1801,16 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     // requestAnimationFrame (queued as macrotask with 0 delay)
     vm.setGlobal("requestAnimationFrame", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("requestAnimationFrame") {
-            if (ARG(0).isCallable()) {
-                VM::Macrotask task;
-                task.fn    = ARG(0);
-                task.delay = 0;
-                vm.macrotasks().push_back(task);
-            }
-            return JsValue::integer((int32_t)vm.macrotasks().size());
+            if (!ARG(0).isCallable()) return JsValue::integer(0);
+            auto t = std::chrono::steady_clock::now().time_since_epoch();
+            double timestamp = (double)std::chrono::duration_cast<std::chrono::microseconds>(t).count() / 1000.0;
+            return JsValue::integer(vm.scheduleMacrotask(ARG(0), { JsValue::number(timestamp) }, 0, false));
         }, "requestAnimationFrame")));
     vm.setGlobal("cancelAnimationFrame", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("cancelAnimationFrame") { return JsValue::undefined(); }, "cancelAnimationFrame")));
+        NATIVE("cancelAnimationFrame") {
+            vm.cancelMacrotask(ARG_INT(0));
+            return JsValue::undefined();
+        }, "cancelAnimationFrame")));
 
     vm.setGlobal("MutationObserver", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("MutationObserver") {
@@ -1486,4 +1962,30 @@ void dispatchDomEvent(VM& vm, Node* target, const std::string& eventName) {
         }
         cur = cur->parent;
     }
+}
+
+void dispatchWindowEvent(VM& vm, const std::string& eventName, JsValue eventValue) {
+    JsValue evVal = eventValue;
+    if (!evVal.isObject()) {
+        auto* ev = vm.gc().newObject(ObjKind::Plain);
+        ev->setProp("type", vm.str(eventName));
+        ev->setProp("target", JsValue::object(vm.globals()));
+        ev->setProp("defaultPrevented", JsValue::boolean(false));
+        ev->setProp("preventDefault", JsValue::object(vm.gc().newNativeFunction(
+            [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "preventDefault")));
+        ev->setProp("stopPropagation", JsValue::object(vm.gc().newNativeFunction(
+            [](VM&, JsValue, std::vector<JsValue>) { return JsValue::undefined(); }, "stopPropagation")));
+        evVal = JsValue::object(ev);
+    }
+
+    JsValue propertyHandler = vm.getGlobal("on" + eventName);
+    if (propertyHandler.isCallable()) {
+        try { vm.call(propertyHandler, JsValue::object(vm.globals()), { evVal }); } catch (...) {}
+    }
+    auto listeners = g_windowEventListeners;
+    for (const auto& listener : listeners) {
+        if (listener.event != eventName || !listener.fn.isCallable()) continue;
+        try { vm.call(listener.fn, JsValue::object(vm.globals()), { evVal }); } catch (...) {}
+    }
+    vm.drainMicrotasks();
 }

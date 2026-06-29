@@ -70,10 +70,18 @@ public:
     void     enqueueMicrotask(JsValue fn, JsValue arg);
     void     drainMicrotasks();
 
-    // Macrotask queue (setTimeout callbacks).
-    struct Macrotask { JsValue fn; std::vector<JsValue> args; int delay; };
+    // Macrotask queue (setTimeout / requestAnimationFrame callbacks).
+    struct Macrotask {
+        JsValue fn;
+        std::vector<JsValue> args;
+        int delay = 0;
+        int id = 0;
+        bool interval = false;
+    };
     std::vector<Macrotask>& macrotasks() { return m_macrotasks; }
     const std::vector<Macrotask>& macrotasks() const { return m_macrotasks; }
+    int scheduleMacrotask(JsValue fn, std::vector<JsValue> args, int delay, bool interval = false);
+    bool cancelMacrotask(int id);
 
     // DOM dirty flag (set when JS modifies the DOM).
     bool domDirty = false;
@@ -106,6 +114,7 @@ private:
 
     std::vector<Microtask> m_microtasks;
     std::vector<Macrotask> m_macrotasks;
+    int m_nextMacrotaskId = 1;
 
     // Runaway-script guard: a top-level execution is aborted once it exceeds a
     // wall-clock deadline, so an infinite loop / pathological script can't hang

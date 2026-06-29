@@ -875,7 +875,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g_renderer.InvalidateLayout();
                     InvalidateContent();
                 };
-                g_js.setDocument(g_tabs[idx].page->dom, repaint, g_tabs[idx].page->url);
+                DomBridgeCallbacks callbacks;
+                callbacks.navigate = [idx](const std::string& url, bool replace) {
+                    if (idx != g_activeTab) return;
+                    Navigate(g_activeTab, url, !replace);
+                };
+                callbacks.scrollTo = [idx](float, float y) {
+                    if (idx != g_activeTab) return;
+                    CurTab().scrollY = y;
+                    ClampScroll();
+                    UpdateScrollbar();
+                    InvalidateContent();
+                };
+                callbacks.scrollBy = [idx](float, float dy) {
+                    if (idx != g_activeTab) return;
+                    CurTab().scrollY += dy;
+                    ClampScroll();
+                    UpdateScrollbar();
+                    InvalidateContent();
+                };
+                callbacks.scrollIntoView = [idx](Node* target) {
+                    if (idx != g_activeTab || !target) return;
+                    const LayoutBox* root = g_renderer.GetLayoutRoot();
+                    if (!root) return;
+                    std::function<bool(const LayoutBox*, float&)> findBox =
+                        [&](const LayoutBox* box, float& y) -> bool {
+                            if (!box) return false;
+                            if (box->node == target) {
+                                y = box->y;
+                                return true;
+                            }
+                            for (const auto& child : box->kids)
+                                if (findBox(child.get(), y)) return true;
+                            for (const auto& line : box->lines) {
+                                for (const auto& frag : line.frags) {
+                                    if (frag.src && frag.src->node == target) {
+                                        y = frag.y;
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        };
+                    float y = 0.f;
+                    if (!findBox(root, y)) return;
+                    CurTab().scrollY = std::max(0.f, y - 16.f);
+                    ClampScroll();
+                    UpdateScrollbar();
+                    InvalidateContent();
+                };
+                g_js.setDocument(g_tabs[idx].page->dom, repaint, g_tabs[idx].page->url, std::move(callbacks));
                 struct ScriptEntry { std::string source; std::string filename; };
                 std::vector<ScriptEntry> deferred;
                 std::vector<const Node*> stack;
@@ -920,6 +969,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 // Run deferred scripts after all inline/blocking scripts.
                 for (auto& ds : deferred)
                     g_js.runScript(ds.source, ds.filename);
+                g_js.dispatchDocumentEvent("DOMContentLoaded");
+                g_js.dispatchWindowEvent("load");
                 // Set up timer for macrotasks / setTimeout
                 SetTimer(hwnd, 1, 16, NULL);
             } catch (...) {

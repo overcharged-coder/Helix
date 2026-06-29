@@ -20,9 +20,12 @@ static void addNative(VM& vm, JsObject* obj, const std::string& name, NativeFn f
 struct JsEngine::Impl {
     GC  gc;
     VM  vm;
+    std::vector<std::unique_ptr<BytecodeFunction>> scripts;
+    std::shared_ptr<Node> document;
 
     explicit Impl() : gc(), vm(gc) {
         registerBuiltins(vm);
+        scripts.reserve(256);
     }
 };
 
@@ -30,9 +33,11 @@ JsEngine::JsEngine() : m_impl(std::make_unique<Impl>()) {}
 JsEngine::~JsEngine() = default;
 
 void JsEngine::setDocument(std::shared_ptr<Node> doc, std::function<void()> onRepaint,
-                           const std::string& pageUrl) {
+                           const std::string& pageUrl,
+                           DomBridgeCallbacks callbacks) {
     m_impl = std::make_unique<Impl>();
-    registerDom(m_impl->vm, std::move(doc), std::move(onRepaint), pageUrl);
+    m_impl->document = doc;
+    registerDom(m_impl->vm, std::move(doc), std::move(onRepaint), pageUrl, std::move(callbacks));
 }
 
 bool JsEngine::runScript(const std::string& source, const std::string& filename) {
@@ -50,6 +55,7 @@ bool JsEngine::runScript(const std::string& source, const std::string& filename)
         Program prog = parser.parse();
         auto bytecode = Compiler::compile(prog);
         m_impl->vm.execute(bytecode.get());
+        m_impl->scripts.push_back(std::move(bytecode));
         m_impl->vm.drainMicrotasks();
         return true;
     } catch (ParseError& e) {
@@ -115,12 +121,17 @@ void JsEngine::dispatchKeyDown(int keyCode, const std::string& key) {
     ev->setProp("which",   JsValue::integer(keyCode));
     addNative(vm, ev, "preventDefault",  NATIVE("preventDefault")  { return JsValue::undefined(); });
     addNative(vm, ev, "stopPropagation", NATIVE("stopPropagation") { return JsValue::undefined(); });
-    // Global onkeydown
-    JsValue onKD = vm.getGlobal("onkeydown");
-    if (onKD.isCallable()) {
-        try { vm.call(onKD, JsValue::object(vm.globals()), {JsValue::object(ev)}); } catch (...) {}
-    }
-    vm.drainMicrotasks();
+    ::dispatchWindowEvent(vm, "keydown", JsValue::object(ev));
+}
+
+void JsEngine::dispatchWindowEvent(const std::string& eventName) {
+    ::dispatchWindowEvent(m_impl->vm, eventName);
+}
+
+void JsEngine::dispatchDocumentEvent(const std::string& eventName) {
+    if (!m_impl->document) return;
+    dispatchDomEvent(m_impl->vm, m_impl->document.get(), eventName);
+    m_impl->vm.drainMicrotasks();
 }
 
 void JsEngine::runMacrotasks() {
@@ -128,10 +139,13 @@ void JsEngine::runMacrotasks() {
     auto tasks = std::move(vm.macrotasks());
     vm.macrotasks().clear();
     for (auto& task : tasks) {
+        if (task.id <= 0 || !task.fn.isCallable()) continue;
         try {
             vm.call(task.fn, JsValue::undefined(), task.args);
             vm.drainMicrotasks();
         } catch (...) {}
+        if (task.interval)
+            vm.macrotasks().push_back(task);
     }
 }
 

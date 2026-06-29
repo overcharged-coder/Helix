@@ -1042,29 +1042,24 @@ static void registerTimers(VM& vm) {
         int delay = args.size() > 1 ? std::max(0, ARG_INT(1)) : 0;
         std::vector<JsValue> cbArgs;
         for (size_t i = 2; i < args.size(); i++) cbArgs.push_back(args[i]);
-        VM::Macrotask task;
-        task.fn    = ARG(0);
-        task.args  = cbArgs;
-        task.delay = delay;
-        vm.macrotasks().push_back(task);
-        return JsValue::integer((int32_t)vm.macrotasks().size());
+        return JsValue::integer(vm.scheduleMacrotask(ARG(0), std::move(cbArgs), delay, false));
     }, "setTimeout")));
 
     vm.setGlobal("clearTimeout", JsValue::object(vm.gc().newNativeFunction(NATIVE("clearTimeout") {
-        // Simplified: no real cancellation without ID lookup
+        vm.cancelMacrotask(ARG_INT(0));
         return JsValue::undefined();
     }, "clearTimeout")));
 
     vm.setGlobal("setInterval", JsValue::object(vm.gc().newNativeFunction(NATIVE("setInterval") {
         if (!ARG(0).isCallable()) return JsValue::integer(0);
-        VM::Macrotask task;
-        task.fn    = ARG(0);
-        task.delay = args.size() > 1 ? std::max(1, ARG_INT(1)) : 1;
-        vm.macrotasks().push_back(task);
-        return JsValue::integer((int32_t)vm.macrotasks().size());
+        int delay = args.size() > 1 ? std::max(1, ARG_INT(1)) : 1;
+        std::vector<JsValue> cbArgs;
+        for (size_t i = 2; i < args.size(); i++) cbArgs.push_back(args[i]);
+        return JsValue::integer(vm.scheduleMacrotask(ARG(0), std::move(cbArgs), delay, true));
     }, "setInterval")));
 
     vm.setGlobal("clearInterval", JsValue::object(vm.gc().newNativeFunction(NATIVE("clearInterval") {
+        vm.cancelMacrotask(ARG_INT(0));
         return JsValue::undefined();
     }, "clearInterval")));
 

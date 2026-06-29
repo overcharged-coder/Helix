@@ -216,8 +216,93 @@ JsValue VM::iteratorNext(JsObject* iter) {
 
 // ── Promise helpers ───────────────────────────────────────────────────────────
 
+static void settlePromiseWith(VM& vm, JsObject* target, JsValue value, bool rejected);
+
+static void attachPromiseMethods(VM& vm, JsObject* p) {
+    if (!p) return;
+    p->setProp("then", JsValue::object(vm.gc().newNativeFunction(
+        [](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+            auto* next = vm.gc().newPromise();
+            attachPromiseMethods(vm, next);
+            JsValue onFulfilled = args.size() > 0 ? args[0] : JsValue::undefined();
+            JsValue onRejected = args.size() > 1 ? args[1] : JsValue::undefined();
+            JsValue fulfill = JsValue::object(vm.gc().newNativeFunction(
+                [next, onFulfilled](VM& vm, JsValue, std::vector<JsValue> cbArgs) -> JsValue {
+                    JsValue value = cbArgs.empty() ? JsValue::undefined() : cbArgs[0];
+                    if (!onFulfilled.isCallable()) {
+                        vm.resolvePromise(next, value);
+                        return JsValue::undefined();
+                    }
+                    try {
+                        settlePromiseWith(vm, next, vm.call(onFulfilled, JsValue::undefined(), { value }), false);
+                    } catch (JsException& ex) {
+                        vm.rejectPromise(next, ex.val);
+                    }
+                    return JsValue::undefined();
+                }, "promise_then_fulfill"));
+            JsValue reject = JsValue::object(vm.gc().newNativeFunction(
+                [next, onRejected](VM& vm, JsValue, std::vector<JsValue> cbArgs) -> JsValue {
+                    JsValue reason = cbArgs.empty() ? JsValue::undefined() : cbArgs[0];
+                    if (!onRejected.isCallable()) {
+                        vm.rejectPromise(next, reason);
+                        return JsValue::undefined();
+                    }
+                    try {
+                        settlePromiseWith(vm, next, vm.call(onRejected, JsValue::undefined(), { reason }), false);
+                    } catch (JsException& ex) {
+                        vm.rejectPromise(next, ex.val);
+                    }
+                    return JsValue::undefined();
+                }, "promise_then_reject"));
+            if (thisVal.isObject() && thisVal.asObject()->kind == ObjKind::Promise)
+                vm.promiseThen(thisVal.asObject(), fulfill, reject);
+            else
+                vm.rejectPromise(next, vm.makeTypeError("then called on non-promise"));
+            return JsValue::object(next);
+        }, "then")));
+    p->setProp("catch", JsValue::object(vm.gc().newNativeFunction(
+        [](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+            JsValue then = thisVal.isObject() ? thisVal.asObject()->getProp("then") : JsValue::undefined();
+            if (then.isCallable()) return vm.call(then, thisVal, { JsValue::undefined(), args.empty() ? JsValue::undefined() : args[0] });
+            return JsValue::undefined();
+        }, "catch")));
+    p->setProp("finally", JsValue::object(vm.gc().newNativeFunction(
+        [](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+            JsValue then = thisVal.isObject() ? thisVal.asObject()->getProp("then") : JsValue::undefined();
+            if (then.isCallable()) {
+                JsValue cb = args.empty() ? JsValue::undefined() : args[0];
+                return vm.call(then, thisVal, { cb, cb });
+            }
+            return JsValue::undefined();
+        }, "finally")));
+}
+
+static void settlePromiseWith(VM& vm, JsObject* target, JsValue value, bool rejected) {
+    if (!target) return;
+    if (rejected) {
+        vm.rejectPromise(target, value);
+        return;
+    }
+    if (value.isObject() && value.asObject()->kind == ObjKind::Promise) {
+        JsValue resolve = JsValue::object(vm.gc().newNativeFunction(
+            [target](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+                vm.resolvePromise(target, args.empty() ? JsValue::undefined() : args[0]);
+                return JsValue::undefined();
+            }, "promise_adopt_resolve"));
+        JsValue reject = JsValue::object(vm.gc().newNativeFunction(
+            [target](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+                vm.rejectPromise(target, args.empty() ? JsValue::undefined() : args[0]);
+                return JsValue::undefined();
+            }, "promise_adopt_reject"));
+        vm.promiseThen(value.asObject(), resolve, reject);
+        return;
+    }
+    vm.resolvePromise(target, value);
+}
+
 JsValue VM::promiseResolve(JsValue val) {
     auto* p = m_gc.newPromise();
+    attachPromiseMethods(*this, p);
     p->promState  = JsObject::PS_Fulfilled;
     p->promResult = val;
     return JsValue::object(p);
@@ -225,6 +310,7 @@ JsValue VM::promiseResolve(JsValue val) {
 
 JsValue VM::promiseReject(JsValue reason) {
     auto* p = m_gc.newPromise();
+    attachPromiseMethods(*this, p);
     p->promState  = JsObject::PS_Rejected;
     p->promResult = reason;
     return JsValue::object(p);
@@ -269,6 +355,27 @@ void VM::drainMicrotasks() {
         m_microtasks.erase(m_microtasks.begin());
         try { call(task.fn, JsValue::undefined(), {task.arg}); } catch (...) {}
     }
+}
+
+int VM::scheduleMacrotask(JsValue fn, std::vector<JsValue> args, int delay, bool interval) {
+    if (!fn.isCallable()) return 0;
+    Macrotask task;
+    task.fn = fn;
+    task.args = std::move(args);
+    task.delay = std::max(0, delay);
+    task.interval = interval;
+    task.id = m_nextMacrotaskId++;
+    if (m_nextMacrotaskId <= 0) m_nextMacrotaskId = 1;
+    m_macrotasks.push_back(std::move(task));
+    return m_macrotasks.back().id;
+}
+
+bool VM::cancelMacrotask(int id) {
+    if (id <= 0) return false;
+    size_t before = m_macrotasks.size();
+    m_macrotasks.erase(std::remove_if(m_macrotasks.begin(), m_macrotasks.end(),
+        [id](const Macrotask& task) { return task.id == id; }), m_macrotasks.end());
+    return m_macrotasks.size() != before;
 }
 
 // ── Function call dispatch ────────────────────────────────────────────────────

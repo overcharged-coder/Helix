@@ -49,6 +49,9 @@ std::string JsValue::toString() const {
             inProgress.pop_back();
             return out;
         }
+        if (u.obj->kind == ObjKind::Error) {
+            return u.obj->errType + (u.obj->errMsg.empty() ? "" : ": " + u.obj->errMsg);
+        }
         // Try toString property (basic)
         return "[object Object]";
     }

@@ -1,5 +1,6 @@
 #pragma once
 #include "html/dom.h"
+#include "js/dom_bridge.h"
 #include <memory>
 #include <functional>
 #include <string>
@@ -13,7 +14,8 @@ public:
 
     // Attach a DOM document so JS can access document/window.
     void setDocument(std::shared_ptr<Node> doc, std::function<void()> onRepaint,
-                     const std::string& pageUrl = "");
+                     const std::string& pageUrl = "",
+                     DomBridgeCallbacks callbacks = {});
 
     // Execute a JS source string (parses, compiles, runs).
     // Returns false and logs on parse/runtime error.
@@ -24,6 +26,8 @@ public:
 
     // Dispatch a keydown event.
     void dispatchKeyDown(int keyCode, const std::string& key);
+    void dispatchWindowEvent(const std::string& eventName);
+    void dispatchDocumentEvent(const std::string& eventName);
 
     // Run pending macrotasks (called by Win32 WM_TIMER).
     void runMacrotasks();
