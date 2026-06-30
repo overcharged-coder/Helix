@@ -157,6 +157,35 @@ static std::string RunDomObserverSnapshot() {
     return box ? box->attr("data-result") + "\n" : "missing box\n";
 }
 
+static std::string RunObserverLifecycleSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body><div id=\"box\" style=\"width:10px; height:20px\"></div><div id=\"other\"></div></body></html>");
+    engine.setDocument(dom, []() {});
+    bool ok = engine.runScript(
+        "var box = document.getElementById('box');\n"
+        "var other = document.getElementById('other');\n"
+        "var ioLog = 'io:';\n"
+        "var io = new IntersectionObserver(function(records, obs) { ioLog += records.length + ':' + records[0].target.id + ':' + records[0].isIntersecting + ':' + (obs === io) + ';'; });\n"
+        "io.observe(box);\n"
+        "io.observe(box);\n"
+        "io.unobserve(box);\n"
+        "io.observe(other);\n"
+        "io.disconnect();\n"
+        "io.observe(box);\n"
+        "var ioRecords = io.takeRecords();\n"
+        "var roLog = 'ro:';\n"
+        "var ro = new ResizeObserver(function(records, obs) { roLog += records.length + ':' + records[0].target.id + ':' + records[0].contentRect.width + 'x' + records[0].contentRect.height + ':' + (obs === ro) + ';'; });\n"
+        "ro.observe(box);\n"
+        "ro.observe(box);\n"
+        "ro.unobserve(box);\n"
+        "ro.disconnect();\n"
+        "document.body.setAttribute('data-result', ioLog + '|take=' + ioRecords.length + '|' + roLog);\n",
+        "observer-lifecycle");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
 static std::string RunDomDirtyCoalescingSnapshot() {
     JsEngine engine;
     int repaintCount = 0;
@@ -368,6 +397,72 @@ static std::string RunFetchPromiseShapeSnapshot() {
     if (!ok) return "script failed\n";
     Node* body = FindByTag(dom.get(), "body");
     return body ? immediate + "|" + body->attr("data-result") + "\n" : "missing body\n";
+}
+
+static std::string RunFetchHeadersWindowOpenSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body></body></html>");
+    engine.setDocument(dom, []() {}, "https://example.org/wiki/Page");
+    bool ok = engine.runScript(
+        "var h = new Headers({ 'Content-Type': 'text/plain' });\n"
+        "h.append('X-Test', 'a');\n"
+        "h.append('x-test', 'b');\n"
+        "var hBefore = h.get('content-type') + ':' + h.get('X-Test') + ':' + h.has('missing');\n"
+        "h.set('x-test', 'c');\n"
+        "h.delete('content-type');\n"
+        "var hAfter = h.has('content-type') + ':' + h.get('x-test');\n"
+        "globalThis.fetchCompat = 'pending';\n"
+        "fetch('data:application/json,{\"ok\":true}').then(function(response) {\n"
+        "  var copy = response.clone();\n"
+        "  globalThis.lastResponse = response;\n"
+        "  globalThis.copyType = copy.headers.get('content-type');\n"
+        "  globalThis.fetchCompat = response.ok + ':' + response.status + ':' + response.statusText + ':' + response.type + ':' + response.headers.get('content-type') + ':' + response.bodyUsed;\n"
+        "  return response.text();\n"
+        "}).then(function(text) { globalThis.fetchCompat = globalThis.fetchCompat + ':' + globalThis.lastResponse.bodyUsed + ':' + globalThis.copyType + ':' + text; });\n"
+        "var popup = window.open('/wiki/Popup', '_blank');\n"
+        "var popupHref = popup.location.href;\n"
+        "var openerHref = popup.opener.location.href;\n"
+        "var popupLog = popupHref + ':' + openerHref + ':' + popup.closed;\n"
+        "popup.focus();\n"
+        "popup.blur();\n"
+        "popup.close();\n"
+        "var closedAfter = popup.closed;\n"
+        "popupLog = popupLog + ':' + closedAfter;\n"
+        "document.body.setAttribute('data-static', hBefore + '|' + hAfter + '|' + popupLog);\n",
+        "fetch-headers-window-open");
+    if (!ok) return "script failed\n";
+    for (int i = 0; i < 200 && HasPendingResourceCompletions(); ++i) {
+        DrainResourceCompletions();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    DrainResourceCompletions();
+    ok = engine.runScript(
+        "document.body.setAttribute('data-result', document.body.getAttribute('data-static') + '|' + globalThis.fetchCompat);\n",
+        "fetch-headers-window-open-result");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
+static std::string RunRequestResponseConstructorSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body></body></html>");
+    engine.setDocument(dom, []() {}, "https://example.org/wiki/Page");
+    bool ok = engine.runScript(
+        "var req = new Request('/api/data', { method: 'post', headers: { 'X-A': '1' }, body: 'payload' });\n"
+        "var res = new Response('ok', { status: 201, statusText: 'Created', headers: { 'Content-Type': 'text/plain' } });\n"
+        "globalThis.ctorResponse = res;\n"
+        "globalThis.ctorCompat = req.url + ':' + req.method + ':' + req.headers.get('x-a') + ':' + req.bodyUsed + '|';\n"
+        "globalThis.ctorCompat = globalThis.ctorCompat + res.ok + ':' + res.status + ':' + res.statusText + ':' + res.headers.get('content-type') + ':' + res.bodyUsed;\n"
+        "res.text().then(function(text) { globalThis.ctorCompat = globalThis.ctorCompat + ':' + globalThis.ctorResponse.bodyUsed + ':' + text; });\n",
+        "request-response-constructors");
+    if (!ok) return "script failed\n";
+    ok = engine.runScript(
+        "document.body.setAttribute('data-result', globalThis.ctorCompat);\n",
+        "request-response-constructors-result");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
 }
 
 static std::string RunPromiseConstructorCombinatorsSnapshot() {
@@ -837,6 +932,18 @@ TestResult RunJsTests() {
         result);
 
     ExpectEqual(
+        "js/async/fetch-headers-and-window-open-compat",
+        RunFetchHeadersWindowOpenSnapshot(),
+        "text/plain:a, b:false|false:c|https://example.org/wiki/Popup:https://example.org/wiki/Page:false:true|true:200:OK:basic:application/json:false:true:application/json:{\"ok\":true}\n",
+        result);
+
+    ExpectEqual(
+        "js/async/request-response-constructors",
+        RunRequestResponseConstructorSnapshot(),
+        "https://example.org/api/data:POST:1:false|true:201:Created:text/plain:false:true:ok\n",
+        result);
+
+    ExpectEqual(
         "js/async/promise-constructor-and-combinators",
         RunPromiseConstructorCombinatorsSnapshot(),
         "p:made|made-chain|all=ab|race=r|settled=fulfilled/rejected\n",
@@ -954,6 +1061,12 @@ TestResult RunJsTests() {
         "js/dom/observers-fire",
         RunDomObserverSnapshot(),
         "1:1:1\n",
+        result);
+
+    ExpectEqual(
+        "js/dom/observer-lifecycle-methods",
+        RunObserverLifecycleSnapshot(),
+        "io:1:box:true:true;1:other:true:true;1:box:true:true;|take=0|ro:1:box:10x20:true;\n",
         result);
 
     ExpectEqual(

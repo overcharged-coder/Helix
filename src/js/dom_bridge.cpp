@@ -2023,17 +2023,115 @@ static JsValue makeStorageObject(VM& vm, std::shared_ptr<std::map<std::string, s
     return JsValue::object(obj);
 }
 
-static JsValue makeFetchResponse(VM& vm, const std::string& url, const FetchResult& res) {
-    auto* response = vm.gc().newObject(ObjKind::Plain);
-    response->setProp("ok", JsValue::boolean(res.success));
-    response->setProp("status", JsValue::integer(res.success ? 200 : 0));
-    response->setProp("url", vm.str(url));
-    std::string body = res.success ? res.body : "";
-    auto bodyStr = vm.str(body);
-    addNative(vm, response, "text", [bodyStr](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
-        return v.promiseResolve(bodyStr);
+using HeaderStore = std::map<std::string, std::pair<std::string, std::string>>;
+
+static std::string normalizeHeaderName(std::string name) {
+    name = trimCopy(name);
+    std::transform(name.begin(), name.end(), name.begin(),
+        [](unsigned char c) { return (char)std::tolower(c); });
+    return name;
+}
+
+static void headersSet(HeaderStore& headers, const std::string& name, const std::string& value) {
+    std::string normalized = normalizeHeaderName(name);
+    if (normalized.empty()) return;
+    headers[normalized] = { trimCopy(name), trimCopy(value) };
+}
+
+static void headersAppend(HeaderStore& headers, const std::string& name, const std::string& value) {
+    std::string normalized = normalizeHeaderName(name);
+    if (normalized.empty()) return;
+    auto it = headers.find(normalized);
+    if (it == headers.end()) headers[normalized] = { trimCopy(name), trimCopy(value) };
+    else it->second.second += ", " + trimCopy(value);
+}
+
+static JsValue makeHeadersObject(VM& vm, HeaderStore initial = {}) {
+    auto state = std::make_shared<HeaderStore>(std::move(initial));
+    auto* headers = vm.gc().newObject(ObjKind::Plain);
+    auto makeArray = [state](VM& vm, const std::string& mode) {
+        auto* arr = newArrayWithPrototype(vm);
+        for (const auto& [name, entry] : *state) {
+            if (mode == "keys") arr->arrayPush(vm.str(name));
+            else if (mode == "values") arr->arrayPush(vm.str(entry.second));
+            else {
+                auto* pair = newArrayWithPrototype(vm);
+                pair->arrayPush(vm.str(name));
+                pair->arrayPush(vm.str(entry.second));
+                arr->arrayPush(JsValue::object(pair));
+            }
+        }
+        return JsValue::object(arr);
+    };
+    addNative(vm, headers, "append", [state](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        if (args.size() >= 2) headersAppend(*state, args[0].toString(), args[1].toString());
+        return JsValue::undefined();
     });
-    addNative(vm, response, "json", [body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+    addNative(vm, headers, "set", [state](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        if (args.size() >= 2) headersSet(*state, args[0].toString(), args[1].toString());
+        return JsValue::undefined();
+    });
+    addNative(vm, headers, "get", [state](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        if (args.empty()) return JsValue::null();
+        auto it = state->find(normalizeHeaderName(args[0].toString()));
+        return it == state->end() ? JsValue::null() : vm.str(it->second.second);
+    });
+    addNative(vm, headers, "has", [state](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        return JsValue::boolean(!args.empty()
+            && state->find(normalizeHeaderName(args[0].toString())) != state->end());
+    });
+    addNative(vm, headers, "delete", [state](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        if (!args.empty()) state->erase(normalizeHeaderName(args[0].toString()));
+        return JsValue::undefined();
+    });
+    addNative(vm, headers, "forEach", [state](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+        if (args.empty() || !args[0].isCallable()) return JsValue::undefined();
+        auto snapshot = *state;
+        JsValue thisArg = args.size() > 1 ? args[1] : JsValue::undefined();
+        for (const auto& [name, entry] : snapshot)
+            vm.call(args[0], thisArg, { vm.str(entry.second), vm.str(name), thisVal });
+        return JsValue::undefined();
+    });
+    addNative(vm, headers, "keys", [makeArray](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+        return makeArray(vm, "keys");
+    });
+    addNative(vm, headers, "values", [makeArray](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+        return makeArray(vm, "values");
+    });
+    addNative(vm, headers, "entries", [makeArray](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+        return makeArray(vm, "entries");
+    });
+    return JsValue::object(headers);
+}
+
+static HeaderStore headersFromInit(JsValue init) {
+    HeaderStore headers;
+    if (!init.isObject()) return headers;
+    auto* obj = init.asObject();
+    if (obj->kind == ObjKind::Array) {
+        for (uint32_t i = 0; i < obj->arrayLength(); ++i) {
+            JsValue pairVal = obj->arrayGet(i);
+            if (!pairVal.isObject()) continue;
+            auto* pair = pairVal.asObject();
+            headersAppend(headers, pair->arrayGet(0).toString(), pair->arrayGet(1).toString());
+        }
+        return headers;
+    }
+    for (const auto& key : obj->ownEnumKeys()) {
+        JsValue value = obj->getProp(key);
+        if (!value.isCallable()) headersSet(headers, key, value.toString());
+    }
+    return headers;
+}
+
+static void installBodyMethods(VM& vm, JsObject* target, const std::string& body, const std::string& type) {
+    target->setProp("bodyUsed", JsValue::boolean(false));
+    addNative(vm, target, "text", [target, body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        target->setProp("bodyUsed", JsValue::boolean(true));
+        return v.promiseResolve(v.str(body));
+    });
+    addNative(vm, target, "json", [target, body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        target->setProp("bodyUsed", JsValue::boolean(true));
         JsValue jsonVal = v.getGlobal("JSON");
         JsValue parsed = JsValue::undefined();
         if (jsonVal.isObject()) {
@@ -2042,6 +2140,44 @@ static JsValue makeFetchResponse(VM& vm, const std::string& url, const FetchResu
                 parsed = v.call(parseFn, jsonVal, { v.str(body) });
         }
         return v.promiseResolve(parsed);
+    });
+    addNative(vm, target, "arrayBuffer", [target, body](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        target->setProp("bodyUsed", JsValue::boolean(true));
+        auto* buffer = v.gc().newObject(ObjKind::Plain);
+        buffer->setProp("byteLength", JsValue::integer((int32_t)body.size()));
+        buffer->setProp("__helixBytes", v.str(body));
+        return v.promiseResolve(JsValue::object(buffer));
+    });
+    addNative(vm, target, "blob", [target, body, type](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        target->setProp("bodyUsed", JsValue::boolean(true));
+        auto* blob = v.gc().newObject(ObjKind::Plain);
+        blob->setProp("size", JsValue::integer((int32_t)body.size()));
+        blob->setProp("type", v.str(type));
+        addNative(v, blob, "text", [body](VM& v2, JsValue, std::vector<JsValue>) -> JsValue {
+            return v2.promiseResolve(v2.str(body));
+        });
+        return v.promiseResolve(JsValue::object(blob));
+    });
+}
+
+static JsValue makeFetchResponse(VM& vm, const std::string& url, const FetchResult& res) {
+    auto* response = vm.gc().newObject(ObjKind::Plain);
+    int status = res.status > 0 ? res.status : (res.success ? 200 : 0);
+    std::string finalUrl = !res.finalUrl.empty() ? res.finalUrl : url;
+    response->setProp("ok", JsValue::boolean(res.success));
+    response->setProp("status", JsValue::integer(status));
+    response->setProp("statusText", vm.str(status >= 200 && status < 300 ? "OK" : ""));
+    response->setProp("url", vm.str(finalUrl));
+    response->setProp("type", vm.str("basic"));
+    response->setProp("redirected", JsValue::boolean(finalUrl != url));
+    response->setProp("bodyUsed", JsValue::boolean(false));
+    HeaderStore headers;
+    if (!res.contentType.empty()) headersSet(headers, "content-type", res.contentType);
+    response->setProp("headers", makeHeadersObject(vm, std::move(headers)));
+    std::string body = res.success ? res.body : "";
+    installBodyMethods(vm, response, body, res.contentType);
+    addNative(vm, response, "clone", [url, res](VM& v, JsValue, std::vector<JsValue>) -> JsValue {
+        return makeFetchResponse(v, url, res);
     });
     return JsValue::object(response);
 }
@@ -2530,9 +2666,122 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         }, "matchMedia")));
 
     // fetch(url) — makes an HTTP request and returns a Promise-like object.
+    vm.setGlobal("Headers", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("Headers") {
+            HeaderStore initial = args.empty() ? HeaderStore{} : headersFromInit(ARG(0));
+            return makeHeadersObject(vm, std::move(initial));
+        }, "Headers")));
+
+    vm.setGlobal("Request", JsValue::object(vm.gc().newNativeFunction(
+        [baseUrl = pageUrl](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+            JsValue input = args.empty() ? JsValue::undefined() : args[0];
+            JsObject* options = args.size() > 1 && args[1].isObject() ? args[1].asObject() : nullptr;
+            std::string url;
+            std::string method = "GET";
+            HeaderStore headers;
+            std::string body;
+            if (input.isObject()) {
+                JsObject* inputObj = input.asObject();
+                JsValue inputUrl = inputObj->getProp("url");
+                url = inputUrl.isUndefined() ? input.toString() : inputUrl.toString();
+                JsValue inputMethod = inputObj->getProp("method");
+                if (!inputMethod.isUndefined()) method = inputMethod.toString();
+                JsValue inputHeaders = inputObj->getProp("headers");
+                if (inputHeaders.isObject()) headers = headersFromInit(inputHeaders);
+            } else {
+                url = input.toString();
+            }
+            if (options) {
+                JsValue optMethod = options->getProp("method");
+                if (!optMethod.isUndefined()) method = optMethod.toString();
+                JsValue optHeaders = options->getProp("headers");
+                if (!optHeaders.isUndefined()) headers = headersFromInit(optHeaders);
+                JsValue optBody = options->getProp("body");
+                if (!optBody.isUndefined() && !optBody.isNull()) body = optBody.toString();
+            }
+            std::transform(method.begin(), method.end(), method.begin(),
+                [](unsigned char c) { return (char)std::toupper(c); });
+            auto* request = vm.gc().newObject(ObjKind::Plain);
+            request->setProp("url", vm.str(resolveDomUrl(url, baseUrl)));
+            request->setProp("method", vm.str(method.empty() ? "GET" : method));
+            request->setProp("headers", makeHeadersObject(vm, std::move(headers)));
+            request->setProp("mode", vm.str("cors"));
+            request->setProp("credentials", vm.str("same-origin"));
+            request->setProp("cache", vm.str("default"));
+            request->setProp("redirect", vm.str("follow"));
+            request->setProp("referrer", vm.str("about:client"));
+            installBodyMethods(vm, request, body, "");
+            addNative(vm, request, "clone", [baseUrl](VM& v, JsValue thisVal, std::vector<JsValue>) -> JsValue {
+                auto* cloned = v.gc().newObject(ObjKind::Plain);
+                if (thisVal.isObject()) {
+                    auto* src = thisVal.asObject();
+                    cloned->setProp("url", src->getProp("url"));
+                    cloned->setProp("method", src->getProp("method"));
+                    cloned->setProp("headers", src->getProp("headers"));
+                    cloned->setProp("mode", src->getProp("mode"));
+                    cloned->setProp("credentials", src->getProp("credentials"));
+                    cloned->setProp("cache", src->getProp("cache"));
+                    cloned->setProp("redirect", src->getProp("redirect"));
+                    cloned->setProp("referrer", src->getProp("referrer"));
+                } else {
+                    cloned->setProp("url", v.str(baseUrl));
+                    cloned->setProp("method", v.str("GET"));
+                    cloned->setProp("headers", makeHeadersObject(v));
+                }
+                installBodyMethods(v, cloned, "", "");
+                return JsValue::object(cloned);
+            });
+            return JsValue::object(request);
+        }, "Request")));
+
+    vm.setGlobal("Response", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("Response") {
+            std::string body = args.empty() || ARG(0).isNullOrUndefined() ? "" : ARG(0).toString();
+            JsObject* options = args.size() > 1 && ARG(1).isObject() ? ARG(1).asObject() : nullptr;
+            int status = 200;
+            std::string statusText = "OK";
+            HeaderStore headers;
+            if (options) {
+                JsValue optStatus = options->getProp("status");
+                if (!optStatus.isUndefined()) status = optStatus.toInt32();
+                JsValue optStatusText = options->getProp("statusText");
+                if (!optStatusText.isUndefined()) statusText = optStatusText.toString();
+                JsValue optHeaders = options->getProp("headers");
+                if (!optHeaders.isUndefined()) headers = headersFromInit(optHeaders);
+            }
+            auto* response = vm.gc().newObject(ObjKind::Plain);
+            response->setProp("ok", JsValue::boolean(status >= 200 && status < 300));
+            response->setProp("status", JsValue::integer(status));
+            response->setProp("statusText", vm.str(statusText));
+            response->setProp("url", vm.str(""));
+            response->setProp("type", vm.str("default"));
+            response->setProp("redirected", JsValue::boolean(false));
+            response->setProp("headers", makeHeadersObject(vm, std::move(headers)));
+            installBodyMethods(vm, response, body, "");
+            addNative(vm, response, "clone", [body, status, statusText](VM& v, JsValue thisVal, std::vector<JsValue>) -> JsValue {
+                auto* cloned = v.gc().newObject(ObjKind::Plain);
+                cloned->setProp("ok", JsValue::boolean(status >= 200 && status < 300));
+                cloned->setProp("status", JsValue::integer(status));
+                cloned->setProp("statusText", v.str(statusText));
+                cloned->setProp("url", v.str(""));
+                cloned->setProp("type", v.str("default"));
+                cloned->setProp("redirected", JsValue::boolean(false));
+                cloned->setProp("headers", thisVal.isObject() ? thisVal.asObject()->getProp("headers") : makeHeadersObject(v));
+                installBodyMethods(v, cloned, body, "");
+                return JsValue::object(cloned);
+            });
+            return JsValue::object(response);
+        }, "Response")));
+
     vm.setGlobal("fetch", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("fetch") {
-            std::string url = ARG_STR(0);
+            std::string url;
+            if (ARG(0).isObject()) {
+                JsValue requestUrl = ARG(0).asObject()->getProp("url");
+                url = requestUrl.isUndefined() ? ARG_STR(0) : requestUrl.toString();
+            } else {
+                url = ARG_STR(0);
+            }
             // Synchronous fetch (simplified — real fetch is async, but our VM
             // doesn't have a true event loop yet).
             auto* promise = vm.gc().newPromise();
@@ -2610,7 +2859,30 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             return JsValue::undefined();
         }, "scrollBy")));
     vm.setGlobal("open", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("window_open") { return JsValue::null(); }, "open")));
+        [historyStack, baseUrl = pageUrl](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+            std::string current = historyStack->entries.empty() ? baseUrl : historyStack->entries[historyStack->index];
+            std::string href = resolveDomUrl(args.empty() ? "" : args[0].toString(), current);
+            auto* popup = vm.gc().newObject(ObjKind::Plain);
+            popup->setProp("closed", JsValue::boolean(false));
+            auto* opener = vm.gc().newObject(ObjKind::Plain);
+            opener->setProp("location", vm.getGlobal("location"));
+            popup->setProp("opener", JsValue::object(opener));
+            popup->setProp("name", vm.str(args.size() > 1 ? args[1].toString() : ""));
+            auto* popupLocation = vm.gc().newObject(ObjKind::Plain);
+            applyLocationProps(vm, popupLocation, href);
+            popup->setProp("location", JsValue::object(popupLocation));
+            addNative(vm, popup, "close", [popup](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+                popup->setProp("closed", JsValue::boolean(true));
+                return JsValue::undefined();
+            });
+            addNative(vm, popup, "focus", [](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+                return JsValue::undefined();
+            });
+            addNative(vm, popup, "blur", [](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+                return JsValue::undefined();
+            });
+            return JsValue::object(popup);
+        }, "open")));
     vm.setGlobal("close", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("window_close") { return JsValue::undefined(); }, "close")));
     vm.setGlobal("focus", JsValue::object(vm.gc().newNativeFunction(
@@ -2835,11 +3107,9 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         NATIVE("IntersectionObserver") {
             auto* obs = vm.gc().newObject(ObjKind::Plain);
             obs->setProp("_callback", ARG(0));
-            addNative(vm, obs, "observe", NATIVE("io_observe") {
-                if (!thisVal.isObject()) return JsValue::undefined();
-                JsValue callback = thisVal.asObject()->getProp("_callback");
-                if (!callback.isCallable()) return JsValue::undefined();
-                Node* target = unwrapNode(ARG(0));
+            auto observed = std::make_shared<std::vector<JsValue>>();
+            auto makeRecord = [](VM& vm, JsValue targetVal) -> JsValue {
+                Node* target = unwrapNode(targetVal);
                 DomMetrics rect = computeDomMetrics(target);
                 auto* bounds = vm.gc().newObject(ObjKind::Plain);
                 bounds->setProp("top", JsValue::number(rect.top));
@@ -2849,17 +3119,43 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                 bounds->setProp("width", JsValue::number(rect.width));
                 bounds->setProp("height", JsValue::number(rect.height));
                 auto* record = vm.gc().newObject(ObjKind::Plain);
-                record->setProp("target", ARG(0));
-                record->setProp("isIntersecting", JsValue::boolean(true));
-                record->setProp("intersectionRatio", JsValue::number(1.0));
+                record->setProp("target", targetVal);
+                record->setProp("time", JsValue::number(0));
+                record->setProp("rootBounds", JsValue::null());
+                record->setProp("isIntersecting", JsValue::boolean(target != nullptr));
+                record->setProp("intersectionRatio", JsValue::number(target ? 1.0 : 0.0));
                 record->setProp("boundingClientRect", JsValue::object(bounds));
-                auto* records = vm.gc().newArray();
-                records->arrayPush(JsValue::object(record));
+                record->setProp("intersectionRect", JsValue::object(bounds));
+                return JsValue::object(record);
+            };
+            addNative(vm, obs, "observe", [observed, makeRecord](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+                if (!thisVal.isObject()) return JsValue::undefined();
+                JsValue callback = thisVal.asObject()->getProp("_callback");
+                if (!callback.isCallable()) return JsValue::undefined();
+                JsValue targetVal = args.empty() ? JsValue::undefined() : args[0];
+                if (std::any_of(observed->begin(), observed->end(),
+                    [&](const JsValue& value) { return value.strictEq(targetVal); }))
+                    return JsValue::undefined();
+                observed->push_back(targetVal);
+                auto* records = newArrayWithPrototype(vm);
+                records->arrayPush(makeRecord(vm, targetVal));
                 try { vm.call(callback, JsValue::undefined(), { JsValue::object(records), thisVal }); } catch (...) {}
                 return JsValue::undefined();
             });
-            addNative(vm, obs, "unobserve",  NATIVE("io_unobserve")  { return JsValue::undefined(); });
-            addNative(vm, obs, "disconnect", NATIVE("io_disconnect") { return JsValue::undefined(); });
+            addNative(vm, obs, "unobserve", [observed](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+                if (args.empty()) return JsValue::undefined();
+                JsValue targetVal = args[0];
+                observed->erase(std::remove_if(observed->begin(), observed->end(),
+                    [&](const JsValue& value) { return value.strictEq(targetVal); }), observed->end());
+                return JsValue::undefined();
+            });
+            addNative(vm, obs, "disconnect", [observed](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+                observed->clear();
+                return JsValue::undefined();
+            });
+            addNative(vm, obs, "takeRecords", [](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+                return JsValue::object(newArrayWithPrototype(vm));
+            });
             return JsValue::object(obs);
         }, "IntersectionObserver")));
 
@@ -2867,25 +3163,59 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         NATIVE("ResizeObserver") {
             auto* obs = vm.gc().newObject(ObjKind::Plain);
             obs->setProp("_callback", ARG(0));
-            addNative(vm, obs, "observe", NATIVE("ro_observe") {
-                if (!thisVal.isObject()) return JsValue::undefined();
-                JsValue callback = thisVal.asObject()->getProp("_callback");
-                if (!callback.isCallable()) return JsValue::undefined();
-                Node* target = unwrapNode(ARG(0));
+            auto observed = std::make_shared<std::vector<JsValue>>();
+            auto makeRecord = [](VM& vm, JsValue targetVal) -> JsValue {
+                Node* target = unwrapNode(targetVal);
                 DomMetrics rect = computeDomMetrics(target);
+                auto* contentRect = vm.gc().newObject(ObjKind::Plain);
+                contentRect->setProp("x", JsValue::number(rect.left));
+                contentRect->setProp("y", JsValue::number(rect.top));
+                contentRect->setProp("top", JsValue::number(rect.top));
+                contentRect->setProp("left", JsValue::number(rect.left));
+                contentRect->setProp("right", JsValue::number(rect.left + rect.width));
+                contentRect->setProp("bottom", JsValue::number(rect.top + rect.height));
+                contentRect->setProp("width", JsValue::number(rect.width));
+                contentRect->setProp("height", JsValue::number(rect.height));
                 auto* size = vm.gc().newObject(ObjKind::Plain);
                 size->setProp("inlineSize", JsValue::number(rect.width));
                 size->setProp("blockSize", JsValue::number(rect.height));
+                auto* sizes = newArrayWithPrototype(vm);
+                sizes->arrayPush(JsValue::object(size));
                 auto* record = vm.gc().newObject(ObjKind::Plain);
-                record->setProp("target", ARG(0));
-                record->setProp("contentRect", JsValue::object(size));
-                auto* records = vm.gc().newArray();
-                records->arrayPush(JsValue::object(record));
+                record->setProp("target", targetVal);
+                record->setProp("contentRect", JsValue::object(contentRect));
+                record->setProp("contentBoxSize", JsValue::object(sizes));
+                record->setProp("borderBoxSize", JsValue::object(sizes));
+                return JsValue::object(record);
+            };
+            addNative(vm, obs, "observe", [observed, makeRecord](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
+                if (!thisVal.isObject()) return JsValue::undefined();
+                JsValue callback = thisVal.asObject()->getProp("_callback");
+                if (!callback.isCallable()) return JsValue::undefined();
+                JsValue targetVal = args.empty() ? JsValue::undefined() : args[0];
+                if (std::any_of(observed->begin(), observed->end(),
+                    [&](const JsValue& value) { return value.strictEq(targetVal); }))
+                    return JsValue::undefined();
+                observed->push_back(targetVal);
+                auto* records = newArrayWithPrototype(vm);
+                records->arrayPush(makeRecord(vm, targetVal));
                 try { vm.call(callback, JsValue::undefined(), { JsValue::object(records), thisVal }); } catch (...) {}
                 return JsValue::undefined();
             });
-            addNative(vm, obs, "unobserve",  NATIVE("ro_unobserve")  { return JsValue::undefined(); });
-            addNative(vm, obs, "disconnect", NATIVE("ro_disconnect") { return JsValue::undefined(); });
+            addNative(vm, obs, "unobserve", [observed](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+                if (args.empty()) return JsValue::undefined();
+                JsValue targetVal = args[0];
+                observed->erase(std::remove_if(observed->begin(), observed->end(),
+                    [&](const JsValue& value) { return value.strictEq(targetVal); }), observed->end());
+                return JsValue::undefined();
+            });
+            addNative(vm, obs, "disconnect", [observed](VM&, JsValue, std::vector<JsValue>) -> JsValue {
+                observed->clear();
+                return JsValue::undefined();
+            });
+            addNative(vm, obs, "takeRecords", [](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+                return JsValue::object(newArrayWithPrototype(vm));
+            });
             return JsValue::object(obs);
         }, "ResizeObserver")));
 
