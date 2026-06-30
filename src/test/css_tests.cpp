@@ -354,6 +354,37 @@ TestResult RunCssTests() {
     }
 
     {
+        auto root = FindRepoRoot();
+        std::string header = ReadTextFile(root / "src/css/stylesheet.h");
+        std::string source = ReadTextFile(root / "src/css/stylesheet.cpp");
+        auto dom = ParseHtml("<html><body><article id=\"story\" class=\"featured lead\"><p id=\"child\"></p></article></body></html>");
+        auto* story = FindElementById(dom.get(), "story");
+        auto* child = FindElementById(dom.get(), "child");
+        auto sheet = ParseStylesheet(
+            "#story { color: red; }"
+            ".featured { padding-left: 2px; }"
+            "article { margin-left: 3px; }"
+            "body .lead p { margin-right: 4px; }"
+            "* { padding-right: 1px; }");
+        const bool indexed =
+            header.find("idRuleBuckets") != std::string::npos
+            && header.find("classRuleBuckets") != std::string::npos
+            && header.find("tagRuleBuckets") != std::string::npos
+            && source.find("candidateRulesFor") != std::string::npos;
+        std::string actual = indexed ? "indexed\n" : "flat\n";
+        actual += "story: ";
+        actual += story ? SerializeComputedStyle(sheet.resolve(story)) : "missing\n";
+        actual += "child: ";
+        actual += child ? SerializeComputedStyle(sheet.resolve(child)) : "missing\n";
+        ExpectEqual("css/cascade/rule-buckets-preserve-cascade",
+            actual,
+            "indexed\n"
+            "story: color=1,0,0,1 marginLeft=3 paddingRight=1 paddingLeft=2 \n"
+            "child: marginRight=4 paddingRight=1 \n",
+            result);
+    }
+
+    {
         auto dom = ParseHtml("<html><body><div class=\"picture\"><p id=\"scalp\"></p></div></body></html>");
         auto* node = FindElementById(dom.get(), "scalp");
         auto sheet = ParseStylesheet(

@@ -131,6 +131,36 @@ TestResult RunPaintTests() {
     {
         auto root = FindRepoRoot();
         std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        const bool timerDoesNotFetch =
+            mainWin.find("PendingPageScriptWaitingForFetch") != std::string::npos
+            && mainWin.find("FetchResourceAsync(job.filename") != std::string::npos
+            && mainWin.find("FetchResourceCached(job.filename") == std::string::npos;
+        ExpectEqual("paint/windows-page-script-fetches-stay-off-ui-timer",
+            timerDoesNotFetch ? "async\n" : "sync\n",
+            "async\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        std::string rendererH = ReadTextFile(root / "src/render/renderer.h");
+        std::string resourceH = ReadTextFile(root / "src/network/resource_cache.h");
+        const bool perfSurface =
+            rendererH.find("LastTimings() const") != std::string::npos
+            && resourceH.find("ResourceCacheStats") != std::string::npos
+            && mainWin.find("HELIX_PERF") != std::string::npos
+            && mainWin.find("g_renderer.LastTimings()") != std::string::npos
+            && mainWin.find("ResourceCache::instance().stats()") != std::string::npos;
+        ExpectEqual("paint/windows-perf-stats-are-surfaced",
+            perfSurface ? "surfaced\n" : "hidden\n",
+            "surfaced\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
         const bool dirtyDropsLayoutCache =
             mainWin.find("auto repaint = []()") != std::string::npos
             && mainWin.find("g_renderer.InvalidateLayout();") != std::string::npos

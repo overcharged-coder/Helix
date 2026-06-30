@@ -26,6 +26,7 @@
 #include <deque>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <mutex>
 #include <condition_variable>
 
@@ -159,6 +160,30 @@ static void SetStatus(const std::string& s) {
     lastStatus = effective;
     SetWindowTextW(g_hwndStatus, ToWide(effective).c_str());
 }
+
+static void UpdatePerfStatusMaybe() {
+    if (getenv("HELIX_PERF") == nullptr) return;
+    const RendererTimings render = g_renderer.LastTimings();
+    const ResourceCacheStats resources = ResourceCache::instance().stats();
+    const JsScriptStats js = g_js.scriptStats();
+    char buffer[512];
+    std::snprintf(buffer, sizeof(buffer),
+        "style %.1fms layout %.1fms%s paint %.1fms | js parse %.1fms run %.1fms %zu/%zu | fetch %.1fms req %llu hit %llu net %llu %.1fMB",
+        render.styleMs,
+        render.layoutMs,
+        render.layoutReused ? " cached" : "",
+        render.paintMs,
+        js.parseMs,
+        js.compileRunMs,
+        js.scriptsExecuted,
+        js.scriptsAttempted,
+        resources.fetchMs,
+        static_cast<unsigned long long>(resources.requests),
+        static_cast<unsigned long long>(resources.cacheHits),
+        static_cast<unsigned long long>(resources.networkFetches),
+        resources.bytesFetched / (1024.0 * 1024.0));
+    SetStatus(buffer);
+}
 static void SetBrowserCursor(HCURSOR cursor) {
     static HCURSOR lastCursor = nullptr;
     if (cursor == lastCursor) return;
@@ -224,6 +249,19 @@ static bool PendingPageScriptStillCurrent(const PendingPageScript& job) {
         && g_tabs[job.tabIdx].page->url == job.pageUrl;
 }
 
+static bool PendingPageScriptWaitingForFetch(const PendingPageScript& job) {
+    return job.fetchBeforeRun && job.source.empty() && !job.filename.empty();
+}
+
+static void RequeueFetchedPageScript(HWND hwnd, PendingPageScript job, FetchResult res) {
+    if (!PendingPageScriptStillCurrent(job)) return;
+    if (res.success && !res.body.empty())
+        job.source = DecodeTextToUtf8(res.body, res.contentType);
+    job.fetchBeforeRun = false;
+    g_pendingPageScripts.push_back(std::move(job));
+    SetTimer(hwnd, 1, 16, NULL);
+}
+
 static void RunPendingPageScripts(HWND hwnd) {
     size_t ran = 0;
     while (!g_pendingPageScripts.empty() && ran < kMaxScriptsPerTimerTick) {
@@ -234,13 +272,13 @@ static void RunPendingPageScripts(HWND hwnd) {
             if (job.dispatchLoadEvents) {
                 g_js.dispatchDocumentEvent("DOMContentLoaded");
                 g_js.dispatchWindowEvent("load");
+            } else if (PendingPageScriptWaitingForFetch(job)) {
+                FetchResourceAsync(job.filename, 1024 * 1024, ResourceKind::Script,
+                    [hwnd, job = std::move(job)](FetchResult res) mutable {
+                        RequeueFetchedPageScript(hwnd, std::move(job), std::move(res));
+                    });
             } else {
                 std::string source = std::move(job.source);
-                if (job.fetchBeforeRun) {
-                    auto res = FetchResourceCached(job.filename, 1024 * 1024, ResourceKind::Script);
-                    if (res.success && !res.body.empty())
-                        source = DecodeTextToUtf8(res.body, res.contentType);
-                }
                 if (!source.empty())
                     g_js.runScript(source, job.filename);
             }
@@ -391,8 +429,7 @@ static void Navigate(int tabIdx, const std::string& rawUrl, bool pushHistory) {
                 if (!res.finalUrl.empty() && res.finalUrl != url)
                     p->url = res.finalUrl;
                 LoadExternalStylesheets(p->dom, p->url);
-                if (getenv("HELIX_JS") != nullptr)
-                    LoadExternalScriptSources(p->dom, p->url);
+                LoadExternalScriptSources(p->dom, p->url);
             } else {
                 p->error = res.error;
             }
@@ -848,6 +885,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_findVisible && ps.rcPaint.bottom >= ContentPaintRect().bottom)
             DrawEditFrame(ps.hdc, g_hwndFind);
         UpdateScrollbar();
+        UpdatePerfStatusMaybe();
         EndPaint(hwnd, &ps);
         if (repaintForFragment) InvalidateRect(hwnd, NULL, FALSE);
         return 0;

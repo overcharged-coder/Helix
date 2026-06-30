@@ -3,6 +3,8 @@
 #include "html/dom.h"
 #include <vector>
 #include <string>
+#include <cstddef>
+#include <unordered_map>
 
 enum class CssAttrMatch {
     Exists,
@@ -70,6 +72,10 @@ struct FontFace {
 struct Stylesheet {
     std::vector<CssRule> rules;
     std::vector<FontFace> fontFaces;
+    std::unordered_map<std::string, std::vector<size_t>> idRuleBuckets;
+    std::unordered_map<std::string, std::vector<size_t>> classRuleBuckets;
+    std::unordered_map<std::string, std::vector<size_t>> tagRuleBuckets;
+    std::vector<size_t> universalRuleBucket;
     float viewportWidth = 800.f;
     float viewportHeight = 600.f;
 
@@ -77,6 +83,8 @@ struct Stylesheet {
         viewportWidth = width;
         viewportHeight = height;
     }
+
+    void rebuildRuleBuckets();
 
     // Compute style for a node from the sheet + its inline style=""
     ComputedStyle resolve(const Node* node) const;

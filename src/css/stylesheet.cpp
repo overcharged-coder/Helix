@@ -1879,15 +1879,82 @@ bool CssRule::matches(const Node* node) const {
 
 // ─── cascade resolution ──────────────────────────────────────────────────────
 
+void Stylesheet::rebuildRuleBuckets() {
+    idRuleBuckets.clear();
+    classRuleBuckets.clear();
+    tagRuleBuckets.clear();
+    universalRuleBucket.clear();
+
+    for (size_t i = 0; i < rules.size(); ++i) {
+        const CssRule& rule = rules[i];
+        if (!rule.id.empty())
+            idRuleBuckets[rule.id].push_back(i);
+        else if (!rule.cls.empty())
+            classRuleBuckets[rule.cls].push_back(i);
+        else if (!rule.tag.empty())
+            tagRuleBuckets[rule.tag].push_back(i);
+        else
+            universalRuleBucket.push_back(i);
+    }
+}
+
+static void AppendCandidateIndices(std::vector<size_t>& out, const std::vector<size_t>* indices) {
+    if (!indices) return;
+    out.insert(out.end(), indices->begin(), indices->end());
+}
+
+static std::vector<std::string> ElementClassTokens(const Node* node) {
+    std::vector<std::string> tokens;
+    if (!node) return tokens;
+    std::istringstream ss(node->attr("class"));
+    std::string token;
+    while (ss >> token)
+        tokens.push_back(token);
+    return tokens;
+}
+
+static std::vector<const CssRule*> candidateRulesFor(const Stylesheet& sheet, const Node* node) {
+    std::vector<size_t> indices;
+    AppendCandidateIndices(indices, &sheet.universalRuleBucket);
+    if (node && node->type == NodeType::Element) {
+        const std::string id = node->attr("id");
+        if (!id.empty()) {
+            auto it = sheet.idRuleBuckets.find(id);
+            if (it != sheet.idRuleBuckets.end())
+                AppendCandidateIndices(indices, &it->second);
+        }
+        for (const auto& cls : ElementClassTokens(node)) {
+            auto it = sheet.classRuleBuckets.find(cls);
+            if (it != sheet.classRuleBuckets.end())
+                AppendCandidateIndices(indices, &it->second);
+        }
+        auto tagIt = sheet.tagRuleBuckets.find(node->tagName);
+        if (tagIt != sheet.tagRuleBuckets.end())
+            AppendCandidateIndices(indices, &tagIt->second);
+    }
+
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+
+    std::vector<const CssRule*> candidates;
+    candidates.reserve(indices.size());
+    for (size_t idx : indices) {
+        if (idx < sheet.rules.size())
+            candidates.push_back(&sheet.rules[idx]);
+    }
+    return candidates;
+}
+
 ComputedStyle Stylesheet::resolve(const Node* node) const {
     // Collect matching rules, sorted by specificity
     std::vector<const CssRule*> matched;
-    for (auto& r : rules) {
+    for (auto* rule : candidateRulesFor(*this, node)) {
+        const CssRule& r = *rule;
         const bool mediaMatches = r.media.empty() || std::any_of(r.media.begin(), r.media.end(),
             [&](const CssMediaCondition& condition) {
                 return condition.matches(viewportWidth, viewportHeight);
             });
-        if (mediaMatches && r.matches(node)) matched.push_back(&r);
+        if (mediaMatches && r.matches(node)) matched.push_back(rule);
     }
     std::stable_sort(matched.begin(), matched.end(),
         [](const CssRule* a, const CssRule* b) {
@@ -2525,6 +2592,7 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
         else
             g_emBase = inheritedEmBase;
     }
+    sheet.rebuildRuleBuckets();
     return sheet;
 }
 
