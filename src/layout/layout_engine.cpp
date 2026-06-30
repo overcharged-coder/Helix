@@ -443,7 +443,8 @@ void AnonymousFixup(LayoutBox* box) {
         auto anon = std::make_unique<LayoutBox>();
         anon->kind = BoxKind::Block;
         anon->anonymous = true;
-        anon->node = box->node;
+        anon->node = nullptr;
+        anon->href = box->href;
         anon->style = AnonymousBlockStyleFrom(box->style);
         anon->establishesInline = true;
         for (auto& r : run) anon->kids.push_back(std::move(r));

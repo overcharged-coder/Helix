@@ -401,6 +401,20 @@ TestResult RunCssTests() {
     }
 
     {
+        auto dom = ParseHtml("<html><body><a id=\"link\">English</a></body></html>");
+        auto* node = FindElementById(dom.get(), "link");
+        auto sheet = ParseStylesheet("#link { outline: 0; }");
+        auto style = node ? sheet.resolve(node) : ComputedStyle{};
+        std::string actual = node
+            ? ((style.outlineSet && style.outlineWidth > 0) ? "visible\n" : "none\n")
+            : "missing\n";
+        ExpectEqual("css/cascade/outline-zero-is-none",
+            actual,
+            "none\n",
+            result);
+    }
+
+    {
         auto root = FindRepoRoot();
         std::string header = ReadTextFile(root / "src/css/stylesheet.h");
         std::string source = ReadTextFile(root / "src/css/stylesheet.cpp");

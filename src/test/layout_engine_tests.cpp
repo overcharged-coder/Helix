@@ -401,8 +401,12 @@ TestResult RunLayoutEngineTests() {
             && !count->lines.empty()
             && !count->lines.front().frags.empty()
             && count->lines.front().frags.front().y >= count->contentY() - 0.5f;
+        bool anonSafe = link && link->kids.size() >= 2
+            && link->kids[1]->anonymous
+            && link->kids[1]->node == nullptr
+            && !link->kids[1]->href.empty();
         ExpectEqual("layout-engine/inline-block-count-follows-block-title",
-            ok ? "stacked\n" : "overlap\n",
+            ok && anonSafe ? "stacked\n" : "overlap\n",
             "stacked\n",
             result);
     }

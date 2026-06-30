@@ -1392,7 +1392,7 @@ static void ApplyDeclaration(const std::string& prop,
             std::string tl = sLower(t);
             if (tl == "none") { out.outlineWidth = 0; }
             else if (tl == "solid" || tl == "dashed" || tl == "dotted" || tl == "double" || tl == "groove" || tl == "ridge" || tl == "inset" || tl == "outset") { /* style */ }
-            else { float f = ParseLength(t); if (f > 0) out.outlineWidth = f; else { CssColor c = ParseCssColor(t); if (c.valid) out.outlineColor = c; } }
+            else { float f = ParseLength(t); if (f >= 0) out.outlineWidth = f; else { CssColor c = ParseCssColor(t); if (c.valid) out.outlineColor = c; } }
         }
     } else if (prop == "outline-width") {
         float f = ParseLength(sTrim(val)); if (f >= 0) { out.outlineWidth = f; out.outlineSet = true; }
