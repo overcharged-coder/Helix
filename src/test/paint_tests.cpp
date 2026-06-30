@@ -281,6 +281,19 @@ TestResult RunPaintTests() {
     {
         auto root = FindRepoRoot();
         std::string painter = ReadTextFile(root / "src/render/box_paint.cpp");
+        const bool authorStyledControls =
+            painter.find("FormControlHasSpriteDescendant") != std::string::npos
+            && painter.find("s.bgColor.valid ? ToD2Dc(s.bgColor)") != std::string::npos
+            && painter.find("s.color.valid ? ToD2Dc(s.color)") != std::string::npos;
+        ExpectEqual("paint/form-controls-respect-author-button-styling",
+            authorStyledControls ? "author\n" : "native-overpaint\n",
+            "author\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string painter = ReadTextFile(root / "src/render/box_paint.cpp");
         const bool plainTextFastPath =
             painter.find("bool needsLayoutObject =") != std::string::npos
             && painter.find("if (!needsLayoutObject)") != std::string::npos

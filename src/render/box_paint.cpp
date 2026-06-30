@@ -28,6 +28,18 @@ static std::wstring NodeTextContentWide(const Node* n) {
     return out;
 }
 
+static bool FormControlHasSpriteDescendant(const Node* n) {
+    if (!n) return false;
+    if (n->type == NodeType::Element) {
+        std::string cls = n->attr("class");
+        if (cls.find("sprite") != std::string::npos || cls.find("svg-") != std::string::npos)
+            return true;
+    }
+    for (const auto& child : n->children)
+        if (FormControlHasSpriteDescendant(child.get())) return true;
+    return false;
+}
+
 static std::string FontCacheKey(const FontKey& f) {
     std::string k = std::to_string((int)(f.size * 4));
     k += f.bold ? "b" : "-";
@@ -300,15 +312,18 @@ void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float to
             float cy = box.contentY() - scrollY + topInset;
             float cw = box.contentW;
             float ch = box.contentH;
-            auto* fill = TempBrush(tag == "button"
-                ? D2D1::ColorF(0.94f, 0.94f, 0.94f, 1.f)
-                : D2D1::ColorF(1.f, 1.f, 1.f, 1.f));
-            auto* border = TempBrush(D2D1::ColorF(0.62f, 0.62f, 0.62f, 1.f));
+            auto* fill = TempBrush(s.bgColor.valid ? ToD2Dc(s.bgColor)
+                : (tag == "button"
+                    ? D2D1::ColorF(0.94f, 0.94f, 0.94f, 1.f)
+                    : D2D1::ColorF(1.f, 1.f, 1.f, 1.f)));
+            auto* border = TempBrush(s.borderColor.valid ? ToD2Dc(s.borderColor)
+                : D2D1::ColorF(0.62f, 0.62f, 0.62f, 1.f));
             if (fill) m_rt->FillRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), fill);
             if (border) m_rt->DrawRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), border, 1.f);
 
             std::wstring label;
-            if (tag == "button" || tag == "select") label = NodeTextContentWide(box.node);
+            if ((tag == "button" && !FormControlHasSpriteDescendant(box.node)) || tag == "select")
+                label = NodeTextContentWide(box.node);
             if (label.empty() && tag == "input") {
                 std::string ph = box.node->attr("placeholder");
                 for (unsigned char c : ph) label += (wchar_t)c;
@@ -320,9 +335,10 @@ void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float to
                 fk.italic = s.italic;
                 fk.family = s.fontFamily;
                 if (auto* fmt = FormatForKey(fk)) {
-                    auto* textBrush = TempBrush(tag == "input"
-                        ? D2D1::ColorF(0.45f, 0.45f, 0.45f, 1.f)
-                        : D2D1::ColorF(0.08f, 0.08f, 0.08f, 1.f));
+                    auto* textBrush = TempBrush(s.color.valid ? ToD2Dc(s.color)
+                        : (tag == "input"
+                            ? D2D1::ColorF(0.45f, 0.45f, 0.45f, 1.f)
+                            : D2D1::ColorF(0.08f, 0.08f, 0.08f, 1.f)));
                     if (textBrush) {
                         float tx = tag == "button" ? 8.f : 6.f;
                         m_rt->DrawText(label.c_str(), (UINT32)label.size(), fmt,

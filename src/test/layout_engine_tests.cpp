@@ -456,7 +456,7 @@ TestResult RunLayoutEngineTests() {
             "<html><body><form id=\"search\">"
             "<input type=\"hidden\" id=\"family\" name=\"family\" value=\"wikipedia\">"
             "<div id=\"search-input\"><input id=\"q\" type=\"search\"><div id=\"picker\"><select id=\"lang\"><option>Afrikaans</option></select></div></div>"
-            "<button id=\"go\">Search</button>"
+            "<button id=\"go\"><i id=\"search-icon\" class=\"sprite svg-search-icon\">Search</i></button>"
             "<input type=\"hidden\" id=\"go-hidden\" value=\"Go\" name=\"go\">"
             "</form></body></html>");
         auto hsheet = ParseStylesheet(
@@ -464,7 +464,8 @@ TestResult RunLayoutEngineTests() {
             "#search-input { display:inline-block; position:relative; width:73%; vertical-align:top; }"
             "#q { width:100%; height:44px; }"
             "#picker { position:absolute; top:0; right:0; width:120px; height:44px; }"
-            "#go { display:inline-block; width:23%; min-height:44px; vertical-align:top; }");
+            "#go { display:inline-block; width:23%; min-height:44px; vertical-align:top; }"
+            ".sprite { display:inline-block; width:22px; height:22px; text-indent:-9999px; }");
         LayoutInput hin; hin.document = hdom.get(); hin.sheet = &hsheet;
         hin.measure = &measure; hin.viewportW = 800.f; hin.viewportH = 400.f;
         auto hl = LayoutDocument(hin);
@@ -474,7 +475,10 @@ TestResult RunLayoutEngineTests() {
         auto* q = FindEngineBoxById(hl.get(), "q");
         auto* picker = FindEngineBoxById(hl.get(), "picker");
         auto* go = FindEngineBoxById(hl.get(), "go");
+        auto* icon = FindEngineBoxById(hl.get(), "search-icon");
         bool rowOk = !family && !hiddenGo && wrap && q && picker && go
+            && go->kind != BoxKind::Replaced
+            && icon && icon->kind == BoxKind::InlineBlock
             && std::abs(wrap->x - q->x) < 0.5f
             && picker->x >= q->x + q->borderBoxW() - picker->borderBoxW() - 1.f
             && go->x >= wrap->x + wrap->borderBoxW() - 1.f

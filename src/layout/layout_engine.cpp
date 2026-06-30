@@ -81,6 +81,13 @@ std::string TextContent(const Node* n) {
     return out;
 }
 
+bool HasElementChild(const Node* n) {
+    if (!n) return false;
+    for (const auto& child : n->children)
+        if (child && child->type == NodeType::Element) return true;
+    return false;
+}
+
 bool HasAttr(const Node* n, const std::string& name) {
     return n && n->attrs.find(name) != n->attrs.end();
 }
@@ -459,7 +466,8 @@ std::unique_ptr<LayoutBox> BuildBox(const Node* node, const ComputedStyle& paren
 
     std::string imgUrl;
     bool replaced = TagIsReplacedImage(node, bc.baseUrl, imgUrl);
-    bool formControl = (tag == "input" || tag == "textarea" || tag == "select" || tag == "button");
+    bool formControl = (tag == "input" || tag == "textarea" || tag == "select"
+                     || (tag == "button" && !HasElementChild(node)));
 
     auto box = std::make_unique<LayoutBox>();
     box->node = node;
