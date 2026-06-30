@@ -3,6 +3,9 @@
 #include "css/stylesheet.h"
 #include "html/parser.h"
 #include "layout/layout_engine.h"
+#include "platform/browser_core.h"
+
+#include <sstream>
 
 namespace {
 class FixedMeasure final : public ITextMeasure {
@@ -22,6 +25,20 @@ LayoutBox* FindEngineBoxById(LayoutBox* box, const std::string& id) {
     if (box->node && box->node->attr("id") == id) return box;
     for (auto& child : box->kids)
         if (auto* found = FindEngineBoxById(child.get(), id)) return found;
+    return nullptr;
+}
+
+LayoutBox* FindEngineBoxByClass(LayoutBox* box, const std::string& cls) {
+    if (!box) return nullptr;
+    if (box->node) {
+        std::istringstream ss(box->node->attr("class"));
+        std::string token;
+        while (ss >> token) {
+            if (token == cls) return box;
+        }
+    }
+    for (auto& child : box->kids)
+        if (auto* found = FindEngineBoxByClass(child.get(), cls)) return found;
     return nullptr;
 }
 } // namespace
@@ -58,6 +75,38 @@ TestResult RunLayoutEngineTests() {
             + " columnDelta=" + std::to_string(columnDelta) + "\n",
         "found rowDelta=105 rowWidth=95 columnDelta=30\n",
         result);
+
+    {
+        const std::string home = HomePageHtml();
+        const size_t styleStart = home.find("<style>");
+        const size_t styleEnd = home.find("</style>");
+        const std::string css = (styleStart != std::string::npos && styleEnd != std::string::npos)
+            ? home.substr(styleStart + 7, styleEnd - styleStart - 7)
+            : "";
+        auto homeDom = ParseHtml(home);
+        auto homeSheet = ParseStylesheet(css);
+        FixedMeasure homeMeasure;
+        LayoutInput homeInput;
+        homeInput.document = homeDom.get();
+        homeInput.sheet = &homeSheet;
+        homeInput.measure = &homeMeasure;
+        homeInput.viewportW = 1000.f;
+        homeInput.viewportH = 700.f;
+        auto homeLayout = LayoutDocument(homeInput);
+        auto* wrap = FindEngineBoxByClass(homeLayout.get(), "w");
+        auto* mark = FindEngineBoxByClass(homeLayout.get(), "mark");
+        auto* links = FindEngineBoxByClass(homeLayout.get(), "links");
+        std::string actual =
+            std::string("wrapW=") + (wrap ? std::to_string((int)(wrap->contentW + 0.5f)) : "missing")
+            + " wrapX=" + (wrap ? std::to_string((int)(wrap->x + 0.5f)) : "missing")
+            + " markDisplay=" + (mark ? std::to_string(mark->style.display) : "missing")
+            + " linksDisplay=" + (links ? std::to_string(links->style.display) : "missing")
+            + "\n";
+        ExpectEqual("layout-engine/homepage-uses-embedded-styles",
+            actual,
+            "wrapW=720 wrapX=140 markDisplay=1 linksDisplay=0\n",
+            result);
+    }
 
     {
         auto lazyDom = ParseHtml(

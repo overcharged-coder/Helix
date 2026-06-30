@@ -2,8 +2,10 @@
 
 #include "css/stylesheet.h"
 #include "html/parser.h"
+#include "platform/browser_core.h"
 
 #include <cstdio>
+#include <sstream>
 
 static const Node* FindFirstElement(const Node* node, const std::string& tag) {
     if (!node) return nullptr;
@@ -23,6 +25,21 @@ static const Node* FindElementById(const Node* node, const std::string& id) {
     return nullptr;
 }
 
+static const Node* FindElementByClass(const Node* node, const std::string& cls) {
+    if (!node) return nullptr;
+    if (node->type == NodeType::Element) {
+        std::istringstream ss(node->attr("class"));
+        std::string token;
+        while (ss >> token) {
+            if (token == cls) return node;
+        }
+    }
+    for (const auto& child : node->children) {
+        if (auto* found = FindElementByClass(child.get(), cls)) return found;
+    }
+    return nullptr;
+}
+
 TestResult RunCssTests() {
     TestResult result;
     auto root = FindRepoRoot();
@@ -32,6 +49,36 @@ TestResult RunCssTests() {
         auto expected = ReadTextFile(root / "tests/fixtures/css/rules/basic.expected.txt");
         auto actual = SerializeStylesheet(ParseStylesheet(input));
         ExpectEqual("css/rules/basic", actual, expected, result);
+    }
+
+    {
+        const std::string html = HomePageHtml();
+        const size_t styleStart = html.find("<style>");
+        const size_t styleEnd = html.find("</style>");
+        const std::string css = (styleStart != std::string::npos && styleEnd != std::string::npos)
+            ? html.substr(styleStart + 7, styleEnd - styleStart - 7)
+            : "";
+        auto dom = ParseHtml(html);
+        auto sheet = ParseStylesheet(css);
+        const Node* wrap = FindElementByClass(dom.get(), "w");
+        const Node* mark = FindElementByClass(dom.get(), "mark");
+        const Node* links = FindElementByClass(dom.get(), "links");
+        const Node* firstLink = FindFirstElement(links, "a");
+        ComputedStyle wrapStyle = wrap ? sheet.resolve(wrap) : ComputedStyle{};
+        ComputedStyle markStyle = mark ? sheet.resolve(mark) : ComputedStyle{};
+        ComputedStyle linkStyle = firstLink ? sheet.resolve(firstLink) : ComputedStyle{};
+        std::string actual =
+            std::string("rules=") + std::to_string(sheet.rules.size())
+            + " wrap=" + (wrapStyle.width >= 0 ? std::to_string((int)wrapStyle.width) : "auto")
+            + " markDisplay=" + std::to_string((int)markStyle.display)
+            + " markBg=" + (markStyle.bgColorSet ? "yes" : "no")
+            + " linkDisplay=" + std::to_string((int)linkStyle.display)
+            + " linkBorder=" + (linkStyle.borderWidth > 0 ? "yes" : "no")
+            + "\n";
+        ExpectEqual("css/homepage-stylesheet-applies",
+            actual,
+            "rules=15 wrap=720 markDisplay=1 markBg=yes linkDisplay=1 linkBorder=yes\n",
+            result);
     }
 
     {

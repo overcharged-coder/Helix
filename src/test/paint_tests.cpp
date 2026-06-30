@@ -76,6 +76,8 @@ TestResult RunPaintTests() {
     {
         auto root = FindRepoRoot();
         std::string renderer = ReadTextFile(root / "src/render/renderer.cpp");
+        std::string linuxMain = ReadTextFile(root / "src/platform/main_linux.cpp");
+        std::string macMain = ReadTextFile(root / "src/platform/main_macos.mm");
         const bool cachesDocumentStyle =
             renderer.find("m_styleDocKey != doc.get()") != std::string::npos
             && renderer.find("m_cachedSheet  = CollectStylesheet(doc.get());") != std::string::npos
@@ -83,6 +85,14 @@ TestResult RunPaintTests() {
         ExpectEqual("paint/document-style-is-cached-off-scroll-path",
             cachesDocumentStyle ? "cached\n" : "per-paint\n",
             "cached\n",
+            result);
+        const bool collectedSheetsCanResolve =
+            renderer.find("sheet.rebuildRuleBuckets();") != std::string::npos
+            && linuxMain.find("sheet.rebuildRuleBuckets();") != std::string::npos
+            && macMain.find("sheet.rebuildRuleBuckets();") != std::string::npos;
+        ExpectEqual("paint/collected-stylesheets-rebuild-selector-buckets",
+            collectedSheetsCanResolve ? "rebuilt\n" : "empty-buckets\n",
+            "rebuilt\n",
             result);
     }
 
