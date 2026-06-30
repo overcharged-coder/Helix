@@ -292,6 +292,46 @@ static std::string colorCss(const CssColor& c) {
     return "rgb(" + std::to_string(r) + ", " + std::to_string(g) + ", " + std::to_string(b) + ")";
 }
 
+static JsValue makeEventObject(VM& vm, const std::string& ctorName, const std::string& type, JsValue options = JsValue::undefined()) {
+    auto* ev = vm.gc().newObject(ObjKind::Plain);
+    bool bubbles = false;
+    bool cancelable = false;
+    JsValue detail = JsValue::null();
+    if (options.isObject()) {
+        auto* opts = options.asObject();
+        bubbles = opts->getProp("bubbles").toBool();
+        cancelable = opts->getProp("cancelable").toBool();
+        JsValue d = opts->getProp("detail");
+        if (!d.isUndefined()) detail = d;
+    }
+    ev->setProp("type", type.empty() ? JsValue::undefined() : vm.str(type));
+    ev->setProp("bubbles", JsValue::boolean(bubbles));
+    ev->setProp("cancelable", JsValue::boolean(cancelable));
+    ev->setProp("target", JsValue::null());
+    ev->setProp("currentTarget", JsValue::null());
+    ev->setProp("defaultPrevented", JsValue::boolean(false));
+    ev->setProp("timeStamp", JsValue::number((double)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0));
+    if (ctorName == "CustomEvent") ev->setProp("detail", detail);
+    installEventMethods(vm, ev);
+    addNative(vm, ev, "initEvent", [ev](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        ev->setProp("type", args.empty() ? JsValue::undefined() : args[0]);
+        ev->setProp("bubbles", JsValue::boolean(args.size() > 1 ? args[1].toBool() : false));
+        ev->setProp("cancelable", JsValue::boolean(args.size() > 2 ? args[2].toBool() : false));
+        ev->setProp("defaultPrevented", JsValue::boolean(false));
+        return JsValue::undefined();
+    });
+    addNative(vm, ev, "initCustomEvent", [ev](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        ev->setProp("type", args.empty() ? JsValue::undefined() : args[0]);
+        ev->setProp("bubbles", JsValue::boolean(args.size() > 1 ? args[1].toBool() : false));
+        ev->setProp("cancelable", JsValue::boolean(args.size() > 2 ? args[2].toBool() : false));
+        ev->setProp("detail", args.size() > 3 ? args[3] : JsValue::null());
+        ev->setProp("defaultPrevented", JsValue::boolean(false));
+        return JsValue::undefined();
+    });
+    return JsValue::object(ev);
+}
+
 static std::string defaultDisplayForTag(const Node* n) {
     if (!n || n->type != NodeType::Element) return "";
     const std::string& t = n->tagName;
@@ -1455,6 +1495,12 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         g_nodeStore[frag.get()] = frag;
         return wrapNode(vm, frag);
     });
+    addNativeM("createEvent", NATIVE("createEvent") {
+        std::string kind = args.empty() ? "Event" : ARG_STR(0);
+        std::string low = lowerCopy(kind);
+        std::string ctor = (low.find("custom") != std::string::npos) ? "CustomEvent" : "Event";
+        return makeEventObject(vm, ctor, "");
+    });
 
     addNativeM("addEventListener", NATIVE("addEventListener") {
         Node* n = unwrapNode(thisVal);
@@ -2187,6 +2233,9 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         docVal.asObject()->setProp("lastModified",    vm.str(""));
         docVal.asObject()->setProp("characterSet",    vm.str("UTF-8"));
         docVal.asObject()->setProp("activeElement",   findFirst("body"));
+        docVal.asObject()->setProp("compatMode",      vm.str("CSS1Compat"));
+        docVal.asObject()->setProp("visibilityState", vm.str("visible"));
+        docVal.asObject()->setProp("hidden",          JsValue::boolean(false));
     }
 
     // window globals — populate location from the page URL.
@@ -2297,6 +2346,28 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     winNavigator->setProp("onLine",      JsValue::boolean(true));
     winNavigator->setProp("platform",    vm.str("Win32"));
     winNavigator->setProp("cookieEnabled",JsValue::boolean(true));
+    {
+        auto* uaData = vm.gc().newObject(ObjKind::Plain);
+        auto* brands = newArrayWithPrototype(vm);
+        auto* helixBrand = vm.gc().newObject(ObjKind::Plain);
+        helixBrand->setProp("brand", vm.str("Helix"));
+        helixBrand->setProp("version", vm.str("1"));
+        brands->arrayPush(JsValue::object(helixBrand));
+        uaData->setProp("brands", JsValue::object(brands));
+        uaData->setProp("mobile", JsValue::boolean(false));
+        uaData->setProp("platform", vm.str("Windows"));
+        addNative(vm, uaData, "getHighEntropyValues", [uaData](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+            auto* out = vm.gc().newObject(ObjKind::Plain);
+            out->setProp("brands", uaData->getProp("brands"));
+            out->setProp("mobile", uaData->getProp("mobile"));
+            out->setProp("platform", uaData->getProp("platform"));
+            out->setProp("architecture", vm.str("x86"));
+            out->setProp("model", vm.str(""));
+            out->setProp("uaFullVersion", vm.str("1.0"));
+            return vm.promiseResolve(JsValue::object(out));
+        });
+        winNavigator->setProp("userAgentData", JsValue::object(uaData));
+    }
     vm.setGlobal("navigator", JsValue::object(winNavigator));
 
     auto* screen = vm.gc().newObject(ObjKind::Plain);
@@ -2576,6 +2647,32 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             return vm.str(out);
         }, "btoa")));
 
+    auto* crypto = vm.gc().newObject(ObjKind::Plain);
+    addNative(vm, crypto, "getRandomValues", NATIVE("crypto.getRandomValues") {
+        if (args.empty() || !ARG(0).isObject()) return ARG(0);
+        auto* arr = ARG(0).asObject();
+        uint32_t len = arr->arrayLength();
+        uint64_t seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+        for (uint32_t i = 0; i < len; ++i) {
+            seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+            arr->arraySet(i, JsValue::integer((int32_t)((seed >> 32) & 0xFF)));
+        }
+        return ARG(0);
+    });
+    addNative(vm, crypto, "randomUUID", NATIVE("crypto.randomUUID") {
+        uint64_t seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+        auto nextHex = [&]() {
+            seed = seed * 2862933555777941757ULL + 3037000493ULL;
+            const char* hex = "0123456789abcdef";
+            std::string out;
+            for (int i = 0; i < 4; ++i) out += hex[(seed >> (i * 4)) & 0xF];
+            return out;
+        };
+        std::string uuid = nextHex() + nextHex() + "-" + nextHex() + "-" + nextHex() + "-" + nextHex() + "-" + nextHex() + nextHex() + nextHex();
+        return vm.str(uuid);
+    });
+    vm.setGlobal("crypto", JsValue::object(crypto));
+
     // window.alert / confirm / prompt
     vm.setGlobal("alert", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("alert") { fprintf(stderr, "[ALERT] %s\n", ARG_STR(0).c_str()); return JsValue::undefined(); }, "alert")));
@@ -2584,11 +2681,82 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     vm.setGlobal("prompt", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("prompt") { return JsValue::null(); }, "prompt")));
 
-    // performance.now()
+    // performance.now() + a small Performance Timeline surface.
     auto* perf = vm.gc().newObject(ObjKind::Plain);
+    struct PerfEntry {
+        std::string name;
+        std::string type;
+        double startTime = 0;
+        double duration = 0;
+    };
+    auto perfEntries = std::make_shared<std::vector<PerfEntry>>();
+    auto nowMs = []() {
+        auto t = std::chrono::steady_clock::now().time_since_epoch();
+        return (double)std::chrono::duration_cast<std::chrono::microseconds>(t).count() / 1000.0;
+    };
+    auto makePerfEntryArray = [perfEntries](VM& vm, const std::string& filter, bool byType) {
+        auto* arr = newArrayWithPrototype(vm);
+        for (const auto& entry : *perfEntries) {
+            if (!filter.empty()) {
+                if (byType && entry.type != filter) continue;
+                if (!byType && entry.name != filter) continue;
+            }
+            auto* obj = vm.gc().newObject(ObjKind::Plain);
+            obj->setProp("name", vm.str(entry.name));
+            obj->setProp("entryType", vm.str(entry.type));
+            obj->setProp("startTime", JsValue::number(entry.startTime));
+            obj->setProp("duration", JsValue::number(entry.duration));
+            arr->arrayPush(JsValue::object(obj));
+        }
+        return JsValue::object(arr);
+    };
     addNative(vm, perf, "now", NATIVE("performance.now") {
         auto t = std::chrono::steady_clock::now().time_since_epoch();
         return JsValue::number((double)std::chrono::duration_cast<std::chrono::microseconds>(t).count() / 1000.0);
+    });
+    addNative(vm, perf, "mark", [perfEntries, nowMs](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        perfEntries->push_back({ args.empty() ? "" : args[0].toString(), "mark", nowMs(), 0 });
+        return JsValue::undefined();
+    });
+    addNative(vm, perf, "measure", [perfEntries, nowMs](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string name = args.empty() ? "" : args[0].toString();
+        double start = nowMs();
+        double end = start;
+        if (args.size() > 1) {
+            std::string startName = args[1].toString();
+            for (const auto& entry : *perfEntries)
+                if (entry.type == "mark" && entry.name == startName) { start = entry.startTime; break; }
+        }
+        if (args.size() > 2) {
+            std::string endName = args[2].toString();
+            for (const auto& entry : *perfEntries)
+                if (entry.type == "mark" && entry.name == endName) { end = entry.startTime; break; }
+        }
+        perfEntries->push_back({ name, "measure", start, std::max(0.0, end - start) });
+        return JsValue::undefined();
+    });
+    addNative(vm, perf, "getEntries", [makePerfEntryArray](VM& vm, JsValue, std::vector<JsValue>) -> JsValue {
+        return makePerfEntryArray(vm, "", true);
+    });
+    addNative(vm, perf, "getEntriesByType", [makePerfEntryArray](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        return makePerfEntryArray(vm, args.empty() ? "" : args[0].toString(), true);
+    });
+    addNative(vm, perf, "getEntriesByName", [makePerfEntryArray](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
+        return makePerfEntryArray(vm, args.empty() ? "" : args[0].toString(), false);
+    });
+    addNative(vm, perf, "clearMarks", [perfEntries](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string name = args.empty() ? "" : args[0].toString();
+        perfEntries->erase(std::remove_if(perfEntries->begin(), perfEntries->end(),
+            [&](const PerfEntry& entry) { return entry.type == "mark" && (name.empty() || entry.name == name); }),
+            perfEntries->end());
+        return JsValue::undefined();
+    });
+    addNative(vm, perf, "clearMeasures", [perfEntries](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string name = args.empty() ? "" : args[0].toString();
+        perfEntries->erase(std::remove_if(perfEntries->begin(), perfEntries->end(),
+            [&](const PerfEntry& entry) { return entry.type == "measure" && (name.empty() || entry.name == name); }),
+            perfEntries->end());
+        return JsValue::undefined();
     });
     vm.setGlobal("performance", JsValue::object(perf));
 
@@ -2605,6 +2773,26 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             vm.cancelMacrotask(ARG_INT(0));
             return JsValue::undefined();
         }, "cancelAnimationFrame")));
+    vm.setGlobal("requestIdleCallback", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("requestIdleCallback") {
+            if (!ARG(0).isCallable()) return JsValue::integer(0);
+            auto* deadline = vm.gc().newObject(ObjKind::Plain);
+            deadline->setProp("didTimeout", JsValue::boolean(false));
+            addNative(vm, deadline, "timeRemaining", NATIVE("idle_timeRemaining") {
+                return JsValue::number(50.0);
+            });
+            int delay = 1;
+            if (args.size() > 1 && ARG(1).isObject()) {
+                JsValue timeout = ARG(1).asObject()->getProp("timeout");
+                if (!timeout.isUndefined()) delay = std::max(0, timeout.toInt32());
+            }
+            return JsValue::integer(vm.scheduleMacrotask(ARG(0), { JsValue::object(deadline) }, delay, false));
+        }, "requestIdleCallback")));
+    vm.setGlobal("cancelIdleCallback", JsValue::object(vm.gc().newNativeFunction(
+        NATIVE("cancelIdleCallback") {
+            vm.cancelMacrotask(ARG_INT(0));
+            return JsValue::undefined();
+        }, "cancelIdleCallback")));
 
     vm.setGlobal("MutationObserver", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("MutationObserver") {
@@ -2706,26 +2894,8 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         std::string ctorName = name;
         vm.setGlobal(name, JsValue::object(vm.gc().newNativeFunction(
             [ctorName](VM& vm, JsValue, std::vector<JsValue> args) -> JsValue {
-            auto* ev = vm.gc().newObject(ObjKind::Plain);
-            ev->setProp("type", args.empty() ? JsValue::undefined() : args[0]);
-            bool bubbles = false;
-            bool cancelable = false;
-            JsValue detail = JsValue::null();
-            if (args.size() > 1 && args[1].isObject()) {
-                auto* options = args[1].asObject();
-                bubbles = options->getProp("bubbles").toBool();
-                cancelable = options->getProp("cancelable").toBool();
-                JsValue d = options->getProp("detail");
-                if (!d.isUndefined()) detail = d;
-            }
-            ev->setProp("bubbles", JsValue::boolean(bubbles));
-            ev->setProp("cancelable", JsValue::boolean(cancelable));
-            ev->setProp("target",  JsValue::null());
-            ev->setProp("currentTarget", JsValue::null());
-            ev->setProp("defaultPrevented", JsValue::boolean(false));
-            if (ctorName == "CustomEvent") ev->setProp("detail", detail);
-            installEventMethods(vm, ev);
-            return JsValue::object(ev);
+            return makeEventObject(vm, ctorName, args.empty() ? "" : args[0].toString(),
+                args.size() > 1 ? args[1] : JsValue::undefined());
         }, name)));
     };
     makeEventCtor("Event");

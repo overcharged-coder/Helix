@@ -733,6 +733,42 @@ static std::string RunWebPlatformSurfaceSnapshot() {
     return body ? body->attr("data-result") + "\n" : "missing body\n";
 }
 
+static std::string RunGeneralPlatformStubsSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body><button id=\"btn\"></button></body></html>");
+    engine.setDocument(dom, []() {}, "https://example.org/wiki/Page");
+    bool ok = engine.runScript(
+        "var ev = document.createEvent('Event');\n"
+        "ev.initEvent('helix', true, true);\n"
+        "var custom = document.createEvent('CustomEvent');\n"
+        "custom.initCustomEvent('data', false, false, { value: 7 });\n"
+        "var btn = document.getElementById('btn');\n"
+        "var body = document.getElementsByTagName('body')[0];\n"
+        "body.setAttribute('data-log', 'start:');\n"
+        "btn.addEventListener('helix', function(e) { body.setAttribute('data-log', body.getAttribute('data-log') + e.type + ':' + e.bubbles + ':' + e.cancelable + ';'); });\n"
+        "btn.dispatchEvent(ev);\n"
+        "performance.mark('start');\n"
+        "performance.mark('end');\n"
+        "performance.measure('span', 'start', 'end');\n"
+        "var marks = performance.getEntriesByType('mark').length;\n"
+        "var measures = performance.getEntriesByName('span').length;\n"
+        "var arr = [0, 0, 0, 0];\n"
+        "crypto.getRandomValues(arr);\n"
+        "var randomish = arr.length + ':' + (arr[0] >= 0) + ':' + (crypto.randomUUID().length >= 32);\n"
+        "globalThis.idleOut = 'pending';\n"
+        "requestIdleCallback(function(deadline) { globalThis.idleOut = 'idle:' + deadline.didTimeout + ':' + (deadline.timeRemaining() >= 0) + ';'; });\n"
+        "body.setAttribute('data-immediate', document.compatMode + '|' + document.visibilityState + '|' + document.hidden + '|' + navigator.userAgentData.mobile + '|' + marks + ':' + measures + '|' + randomish + '|' + custom.detail.value);\n",
+        "general-platform-stubs");
+    if (!ok) return "script failed\n";
+    while (engine.hasPendingMacrotasks()) engine.runMacrotasks();
+    ok = engine.runScript(
+        "document.getElementsByTagName('body')[0].setAttribute('data-result', globalThis.idleOut);\n",
+        "general-platform-stubs-result");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-immediate") + "|" + body->attr("data-log") + "|" + body->attr("data-result") + "\n" : "missing body\n";
+}
+
 static std::string RunScriptBudgetProfileSnapshot() {
     JsEngine engine;
     JsScriptBudget budget;
@@ -888,6 +924,12 @@ TestResult RunJsTests() {
         "js/web-platform/storage-url-and-matchmedia",
         RunWebPlatformSurfaceSnapshot(),
         "42|tab|/w/index.php|Helix|view|1,3|true\n",
+        result);
+
+    ExpectEqual(
+        "js/web-platform/general-platform-stubs",
+        RunGeneralPlatformStubsSnapshot(),
+        "CSS1Compat|visible|false|false|2:1|4:true:true|7|start:helix:true:true;|idle:false:true;\n",
         result);
 
     ExpectEqual(
