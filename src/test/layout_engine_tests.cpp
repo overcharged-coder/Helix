@@ -671,5 +671,58 @@ TestResult RunLayoutEngineTests() {
             "stable\n",
             result);
     }
+
+    // Anonymous block wrappers around inline runs must not copy layout-affecting
+    // parent styles such as overflow:hidden. Wikipedia's footer uses an
+    // overflow-hidden container with floated sidebars followed by an inline
+    // project grid; the anonymous inline wrapper still has to see those floats.
+    {
+        auto fdom = ParseHtml(
+            "<html><body><footer id=\"footer\">"
+            "<div id=\"side\">hosted by Wikimedia Foundation text text text</div>"
+            "<nav id=\"projects\"><a id=\"grid\">Commons Wikivoyage Wikibooks</a></nav>"
+            "</footer></body></html>");
+        auto fsheet = ParseStylesheet(
+            "#footer{overflow:hidden;width:900px;padding:0;}"
+            "#side{float:left;width:260px;height:160px;}"
+            "#projects{display:inline-block;width:65%;height:120px;}");
+        LayoutInput fin; fin.document = fdom.get(); fin.sheet = &fsheet;
+        fin.measure = &measure; fin.viewportW = 1000.f; fin.viewportH = 700.f;
+        auto fl = LayoutDocument(fin);
+        auto* side = FindEngineBoxById(fl.get(), "side");
+        auto* projects = FindEngineBoxById(fl.get(), "projects");
+        bool placedBesideFloat = side && projects
+            && projects->x >= side->x + side->borderBoxW() - 1.f
+            && projects->y < side->y + side->borderBoxH();
+        ExpectEqual("layout-engine/anonymous-inline-wrapper-sees-footer-floats",
+            placedBesideFloat ? "beside\n" : "overlap\n",
+            "beside\n",
+            result);
+    }
+
+    // clear:left also applies to floated boxes. Wikipedia's footer stacks its
+    // second left sidebar below the first with float:left; clear:left.
+    {
+        auto cdom = ParseHtml(
+            "<html><body><div id=\"wrap\">"
+            "<div id=\"first\"></div><div id=\"second\"></div>"
+            "</div></body></html>");
+        auto csheet = ParseStylesheet(
+            "#wrap{width:500px;}"
+            "#first{float:left;width:200px;height:80px;}"
+            "#second{float:left;clear:left;width:200px;height:60px;}");
+        LayoutInput cin; cin.document = cdom.get(); cin.sheet = &csheet;
+        cin.measure = &measure; cin.viewportW = 700.f; cin.viewportH = 400.f;
+        auto cl = LayoutDocument(cin);
+        auto* first = FindEngineBoxById(cl.get(), "first");
+        auto* second = FindEngineBoxById(cl.get(), "second");
+        bool cleared = first && second
+            && second->y >= first->y + first->borderBoxH() - 0.5f
+            && std::abs(second->x - first->x) < 0.5f;
+        ExpectEqual("layout-engine/floats-honor-clear-left",
+            cleared ? "cleared\n" : "beside\n",
+            "cleared\n",
+            result);
+    }
     return result;
 }

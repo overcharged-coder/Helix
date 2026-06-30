@@ -359,6 +359,61 @@ void BuildChildren(const Node* node, const ComputedStyle& style, const BuildCtx&
 
 // Apply anonymous block fixup: if `box` (a block container) has any block-level
 // child, wrap each contiguous run of inline-level children in an anonymous block.
+ComputedStyle AnonymousBlockStyleFrom(const ComputedStyle& parent) {
+    ComputedStyle s;
+    s.display = 1;
+
+    // Anonymous block boxes inherit text-facing properties from their parent,
+    // but layout-affecting properties keep their initial values. Copying the
+    // full parent style can accidentally create a new BFC and make inline runs
+    // ignore sibling floats.
+    s.color = parent.color;
+    s.fontSize = parent.fontSize;
+    s.fontFamily = parent.fontFamily;
+    if (parent.boldSet) { s.bold = parent.bold; s.boldSet = true; }
+    if (parent.italicSet) { s.italic = parent.italic; s.italicSet = true; }
+    s.underline = parent.underline;
+    s.noUnderline = parent.noUnderline;
+    s.lineThrough = parent.lineThrough;
+    s.lineHeight = parent.lineHeight;
+    if (parent.textAlignSet) { s.textAlign = parent.textAlign; s.textAlignSet = true; }
+    if (parent.textIndentSet) { s.textIndent = parent.textIndent; s.textIndentSet = true; }
+    if (parent.textTransformSet) {
+        s.textTransform = parent.textTransform;
+        s.textTransformSet = true;
+    }
+    if (parent.whiteSpaceSet) {
+        s.whiteSpaceNowrap = parent.whiteSpaceNowrap;
+        s.whiteSpacePre = parent.whiteSpacePre;
+        s.whiteSpaceSet = true;
+    }
+    if (parent.letterSpacingSet) {
+        s.letterSpacing = parent.letterSpacing;
+        s.letterSpacingSet = true;
+    }
+    if (parent.wordBreakSet) {
+        s.wordBreak = parent.wordBreak;
+        s.wordBreakSet = true;
+    }
+    if (parent.visibilitySet) {
+        s.visibilityHidden = parent.visibilityHidden;
+        s.visibilitySet = true;
+    }
+    if (parent.listStyleSet) {
+        s.listStyleNone = parent.listStyleNone;
+        s.listStyleSet = true;
+    }
+    if (parent.textShadowSet) {
+        s.textShadowX = parent.textShadowX;
+        s.textShadowY = parent.textShadowY;
+        s.textShadowBlur = parent.textShadowBlur;
+        s.textShadowColor = parent.textShadowColor;
+        s.textShadowSet = true;
+    }
+    s.customProperties = parent.customProperties;
+    return s;
+}
+
 void AnonymousFixup(LayoutBox* box) {
     bool hasBlock = false, hasInline = false;
     for (auto& k : box->kids) {
@@ -389,7 +444,7 @@ void AnonymousFixup(LayoutBox* box) {
         anon->kind = BoxKind::Block;
         anon->anonymous = true;
         anon->node = box->node;
-        anon->style = box->style;          // inherit font/color
+        anon->style = AnonymousBlockStyleFrom(box->style);
         anon->establishesInline = true;
         for (auto& r : run) anon->kids.push_back(std::move(r));
         run.clear();
@@ -1029,6 +1084,8 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
         // Float: place on its side at the current y.
         if (k->isFloat()) {
             float fy = cursorY;
+            if (k->style.clearMode != 0)
+                fy = fctx.clearTo(fy, k->style.clearMode);
             std::vector<LayoutBox*> pos;
             // Floats with auto width shrink-to-fit their content.
             layoutBox(*k, box.contentX(), box.contentW, -1.f, pos, &fctx, /*shrinkToFit=*/true);
