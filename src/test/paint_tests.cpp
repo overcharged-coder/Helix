@@ -279,6 +279,21 @@ TestResult RunPaintTests() {
         auto root = FindRepoRoot();
         std::string renderer = ReadTextFile(root / "src/render/renderer.cpp");
         std::string rendererH = ReadTextFile(root / "src/render/renderer.h");
+        const bool hoverLayoutClassified =
+            rendererH.find("m_cachedHoverAffectsLayout") != std::string::npos
+            && renderer.find("StylesheetHoverAffectsLayout") != std::string::npos
+            && renderer.find("m_cachedHoverAffectsLayout = StylesheetHoverAffectsLayout(m_cachedSheet);") != std::string::npos
+            && renderer.find("hoverChanged && sheet && m_cachedHoverAffectsLayout") != std::string::npos;
+        ExpectEqual("paint/paint-only-hover-keeps-layout-cache",
+            hoverLayoutClassified ? "paint-only\n" : "relayouts\n",
+            "paint-only\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string renderer = ReadTextFile(root / "src/render/renderer.cpp");
+        std::string rendererH = ReadTextFile(root / "src/render/renderer.h");
         const bool brushCache =
             rendererH.find("m_tempBrushCache") != std::string::npos
             && renderer.find("m_tempBrushCache.find(key)") != std::string::npos
@@ -317,6 +332,21 @@ TestResult RunPaintTests() {
         ExpectEqual("paint/hover-node-hit-test-reuses-last-region",
             hoverNodeCache ? "cached\n" : "walks-tree\n",
             "cached\n",
+            result);
+    }
+
+    {
+        auto root = FindRepoRoot();
+        std::string mainWin = ReadTextFile(root / "src/main.cpp");
+        std::string rendererH = ReadTextFile(root / "src/render/renderer.h");
+        const bool dirtyHoverRects =
+            rendererH.find("LastHoverRegion(") != std::string::npos
+            && mainWin.find("InvalidateHoverRegions(") != std::string::npos
+            && mainWin.find("g_renderer.LastHoverRegion(oldHoverRegion)") != std::string::npos
+            && mainWin.find("g_renderer.LastHoverRegion(newHoverRegion)") != std::string::npos;
+        ExpectEqual("paint/hover-invalidates-dirty-regions",
+            dirtyHoverRects ? "dirty\n" : "full-content\n",
+            "dirty\n",
             result);
     }
 

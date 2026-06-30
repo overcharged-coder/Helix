@@ -235,6 +235,35 @@ static void InvalidateContent() {
     InvalidateRect(g_hwnd, &rc, FALSE);
 }
 
+static RECT HoverRegionToClientRect(const HitRegion& region) {
+    RECT content = ContentPaintRect();
+    RECT rc{};
+    rc.left = (LONG)(region.x - 3.f);
+    rc.top = (LONG)(region.y - CurTab().scrollY + (float)TOP_INSET - 3.f);
+    rc.right = (LONG)(region.x + region.w + 4.f);
+    rc.bottom = (LONG)(region.y + region.h - CurTab().scrollY + (float)TOP_INSET + 4.f);
+    rc.left = std::max(content.left, rc.left);
+    rc.top = std::max(content.top, rc.top);
+    rc.right = std::min(content.right, rc.right);
+    rc.bottom = std::min(content.bottom, rc.bottom);
+    return rc;
+}
+
+static void InvalidateHoverRegions(const HitRegion* oldRegion, const HitRegion* newRegion) {
+    if (!g_hwnd) return;
+    if (!oldRegion || !newRegion) {
+        InvalidateContent();
+        return;
+    }
+    RECT oldRect = HoverRegionToClientRect(*oldRegion);
+    RECT newRect = HoverRegionToClientRect(*newRegion);
+    RECT dirty{};
+    if (UnionRect(&dirty, &oldRect, &newRect) && dirty.right > dirty.left && dirty.bottom > dirty.top)
+        InvalidateRect(g_hwnd, &dirty, FALSE);
+    else
+        InvalidateContent();
+}
+
 static void ClearPendingPageScriptsForTab(int tabIdx) {
     g_pendingPageScripts.erase(
         std::remove_if(g_pendingPageScripts.begin(), g_pendingPageScripts.end(),
@@ -1275,14 +1304,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 static DWORD lastHoverTick = 0;
                 DWORD now = GetTickCount();
                 if (now - lastHoverTick >= 33) { // ~30Hz
+                    HitRegion oldHoverRegion{};
+                    bool hadOldHoverRegion = g_renderer.LastHoverRegion(oldHoverRegion);
                     const Node* hover = g_renderer.HoverNodeAt(
                         (float)px, (float)py, CurTab().scrollY, (float)TOP_INSET);
                     if (hover != g_hoverNode) {
+                        HitRegion newHoverRegion{};
+                        bool hasNewHoverRegion = g_renderer.LastHoverRegion(newHoverRegion);
                         g_hoverNode = hover;
                         lastHoverTick = now;
                         // Only invalidate paint, not layout — hover mostly affects
                         // colors/opacity, not geometry. Full layout rebuild is expensive.
-                        InvalidateContent();
+                        InvalidateHoverRegions(
+                            hadOldHoverRegion ? &oldHoverRegion : nullptr,
+                            hasNewHoverRegion ? &newHoverRegion : nullptr);
                     }
                 }
             } else if (g_hoverNode) {

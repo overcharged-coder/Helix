@@ -54,6 +54,7 @@ public:
 
     std::string HitTest(float x, float y) const;
     const Node* HoverNodeAt(float x, float y, float scrollY, float topInset) const;
+    bool LastHoverRegion(HitRegion& out) const;
     int  HitTestTab(float x, float y) const;
     bool HitTestTabClose(float x, float y, int& outIdx) const;
     bool GetAnchorY(const std::string& anchor, float& outY) const;
@@ -145,6 +146,8 @@ private:
     void PaintLines(const LayoutBox& box, float scrollY, float topInset, bool underFixed);
     void PaintBoxDecorations(const LayoutBox& box, float scrollY, float topInset);
     void CollectAnchors(const LayoutBox& box);
+    void CaptureLayoutBaseStyles(const LayoutBox& box);
+    void ApplyPaintOnlyHoverStyles(LayoutBox& box, const Stylesheet& sheet);
     IDWriteTextFormat* FormatForKey(const FontKey& f);
     std::map<std::string, IDWriteTextFormat*> m_fmtCache;
     std::map<std::wstring, float>             m_measureCache;
@@ -156,8 +159,10 @@ private:
     const Node* m_styleDocKey = nullptr;
     std::string m_styleBaseUrlKey;
     bool        m_cachedUsesHoverStyles = false;
+    bool        m_cachedHoverAffectsLayout = false;
 
     std::unique_ptr<LayoutBox> m_layoutRoot;
+    std::map<const LayoutBox*, ComputedStyle> m_layoutBaseStyles;
     const Node* m_layoutDocKey  = nullptr;
     UINT  m_layoutWKey = 0, m_layoutHKey = 0;
     float m_layoutZoomKey = 0.f;

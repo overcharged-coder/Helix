@@ -225,6 +225,7 @@ void Renderer::Resize(UINT w, UINT h) {
 
 void Renderer::InvalidateLayout() {
     m_layoutRoot.reset();
+    m_layoutBaseStyles.clear();
     m_layoutDocKey = nullptr;
     m_lastHoverNodeValid = false;
     m_lastHoverNode = nullptr;
@@ -439,6 +440,43 @@ static bool StylesheetUsesHover(const Stylesheet& sheet) {
     return false;
 }
 
+static bool RuleUsesHover(const CssRule& rule) {
+    for (const auto& part : rule.selector)
+        if (SelectorPartUsesHover(part)) return true;
+    return false;
+}
+
+static bool StyleMayAffectLayout(const ComputedStyle& s) {
+    return s.display != 0
+        || s.marginTopSet() || s.marginRightSet() || s.marginBottomSet() || s.marginLeftSet()
+        || s.paddingTop >= 0 || s.paddingRight >= 0 || s.paddingBottom >= 0 || s.paddingLeft >= 0
+        || s.borderWidth >= 0 || s.borderTopWidth >= 0 || s.borderRightWidth >= 0
+        || s.borderBottomWidth >= 0 || s.borderLeftWidth >= 0
+        || s.fontSize > 0 || !s.fontFamily.empty() || s.boldSet || s.italicSet
+        || s.lineHeight > 0 || s.textAlignSet || s.textIndentSet || s.verticalAlignSet
+        || s.textTransformSet || s.whiteSpaceSet || s.letterSpacingSet || s.wordBreakSet
+        || s.columnCountSet || s.aspectRatioSet
+        || s.width >= 0 || s.widthPercent >= 0 || s.widthCalcPercent >= 0
+        || s.height >= 0 || s.heightPercent >= 0
+        || s.maxWidth >= 0 || s.maxWidthPercent >= 0 || s.minWidth >= 0 || s.minWidthPercent >= 0
+        || s.minHeight >= 0 || s.minHeightPercent >= 0 || s.maxHeight >= 0 || s.maxHeightPercent >= 0
+        || s.contentSet || s.floatMode != 0 || s.clearMode != 0 || s.positionMode != 0
+        || s.zIndexSet || s.overflowSet || s.topSet || s.rightSet || s.bottomSet || s.leftSet
+        || s.widthKeyword != 0 || s.heightKeyword != 0 || s.boxSizingSet
+        || s.flexDirectionSet || s.flexGrowSet || s.flexShrinkSet || s.flexBasisSet
+        || s.flexWrapSet || s.alignSelfSet || s.flexGap >= 0 || s.alignItemsSet
+        || s.justifyContentSet || s.gridTemplateColumnsSet || s.gridTemplateRowsSet
+        || s.gridColumnStart != 0 || s.gridColumnEnd != 0 || s.gridRowStart != 0 || s.gridRowEnd != 0;
+}
+
+static bool StylesheetHoverAffectsLayout(const Stylesheet& sheet) {
+    for (const auto& rule : sheet.rules) {
+        if (RuleUsesHover(rule) && StyleMayAffectLayout(rule.style))
+            return true;
+    }
+    return false;
+}
+
 bool Renderer::UsesHoverStyles() const {
     return m_cachedUsesHoverStyles;
 }
@@ -472,6 +510,28 @@ Stylesheet Renderer::CollectStylesheet(const Node* root) {
     walk(root);
     sheet.rebuildRuleBuckets();
     return sheet;
+}
+
+void Renderer::CaptureLayoutBaseStyles(const LayoutBox& box) {
+    m_layoutBaseStyles[&box] = box.style;
+    for (const auto& child : box.kids)
+        CaptureLayoutBaseStyles(*child);
+}
+
+void Renderer::ApplyPaintOnlyHoverStyles(LayoutBox& box, const Stylesheet& sheet) {
+    auto base = m_layoutBaseStyles.find(&box);
+    if (base != m_layoutBaseStyles.end())
+        box.style = base->second;
+
+    if (box.node && box.node->type == NodeType::Element) {
+        ComputedStyle resolved = sheet.resolve(box.node);
+        ComputedStyle styled = box.style.inherit(resolved);
+        ResolveStyleVariables(styled);
+        box.style = styled;
+    }
+
+    for (auto& child : box.kids)
+        ApplyPaintOnlyHoverStyles(*child, sheet);
 }
 
 CssColor Renderer::FindBodyBgColor(const Node* root, const Stylesheet& sheet) {
@@ -523,6 +583,7 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
             m_cachedSheet  = CollectStylesheet(doc.get());
             m_cachedPageBg = FindBodyBgColor(doc.get(), m_cachedSheet);
             m_cachedUsesHoverStyles = StylesheetUsesHover(m_cachedSheet);
+            m_cachedHoverAffectsLayout = StylesheetHoverAffectsLayout(m_cachedSheet);
             m_styleDocKey = doc.get();
             m_styleBaseUrlKey = baseUrl;
             if (!m_cachedSheet.fontFaces.empty())
@@ -580,7 +641,7 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
             extern const Node* g_hoverNode;
             static const Node* prevHover = nullptr;
             bool hoverChanged = (g_hoverNode != prevHover);
-            bool hoverMayAffectStyle = hoverChanged && sheet && StylesheetUsesHover(*sheet);
+            bool hoverMayAffectStyle = hoverChanged && sheet && m_cachedHoverAffectsLayout;
             std::map<const Node*, ComputedStyle> oldStyles;
             if (hoverMayAffectStyle && m_layoutRoot) {
                 std::function<void(const LayoutBox&)> collect = [&](const LayoutBox& b) {
@@ -591,6 +652,10 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
                 collect(*m_layoutRoot);
             }
             SetCssHoverNode(g_hoverNode);
+            if (hoverChanged && sheet && m_cachedUsesHoverStyles
+                && !m_cachedHoverAffectsLayout && m_layoutRoot) {
+                ApplyPaintOnlyHoverStyles(*m_layoutRoot, *sheet);
+            }
             bool reuse = m_layoutRoot
                       && m_layoutDocKey  == doc.get()
                       && m_layoutWKey    == m_width
@@ -617,6 +682,8 @@ float Renderer::Paint(const std::shared_ptr<Node>& doc,
                 m_layoutZoomKey= effZoom;
                 m_anchorY.clear();
                 if (m_layoutRoot) CollectAnchors(*m_layoutRoot);
+                m_layoutBaseStyles.clear();
+                if (m_layoutRoot) CaptureLayoutBaseStyles(*m_layoutRoot);
                 auto layoutEnd = std::chrono::steady_clock::now();
                 m_lastTimings.layoutMs =
                     std::chrono::duration<double, std::milli>(layoutEnd - layoutStart).count();
@@ -740,6 +807,12 @@ const Node* Renderer::HoverNodeAt(float x, float y, float scrollY, float topInse
         m_lastHoverNode = nullptr;
     }
     return found->node;
+}
+
+bool Renderer::LastHoverRegion(HitRegion& out) const {
+    if (!m_lastHoverNodeValid) return false;
+    out = m_lastHoverNodeRegion;
+    return true;
 }
 
 bool Renderer::GetAnchorY(const std::string& anchor, float& outY) const {
