@@ -770,6 +770,8 @@ float collapseMargins(float a, float b) {
     return a + b;
 }
 
+static void TranslateSubtree(LayoutBox& box, float dx, float dy);
+
 // A box establishes a *new* block formatting context when it is floated,
 // out-of-flow, a flex/table container, or has non-visible overflow. Such a box
 // does NOT let its ancestors' floats intrude into its content — text inside it
@@ -1040,9 +1042,11 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
                 availL = fctx.leftEdge(fy, k->marginBoxH());
                 availR = fctx.rightEdge(fy, k->marginBoxH());
             }
-            if (k->style.floatMode == 1) k->x = availL + k->marginLeft;
-            else                          k->x = availR - k->marginBoxW() + k->marginLeft;
-            k->y = fy + k->marginTop;
+            float targetX = k->style.floatMode == 1
+                ? availL + k->marginLeft
+                : availR - k->marginBoxW() + k->marginLeft;
+            float targetY = fy + k->marginTop;
+            TranslateSubtree(*k, targetX - k->x, targetY - k->y);
             fctx.floats.push_back({ fy, fy + k->marginBoxH(),
                                     k->x - k->marginLeft, k->x - k->marginLeft + k->borderBoxW(),
                                     k->style.floatMode });

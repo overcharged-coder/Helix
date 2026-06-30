@@ -616,5 +616,60 @@ TestResult RunLayoutEngineTests() {
             "wrapped\n",
             result);
     }
+
+    // Wikipedia's sister-project tiles are left floats with inline-block link
+    // content; the floated cards must pack across the row and their title /
+    // tagline spans must stack vertically inside the text column.
+    {
+        auto pdom = ParseHtml(
+            "<html><body><nav id=\"projects\" class=\"other-projects\">"
+            "<div id=\"p1\" class=\"other-project\"><a id=\"l1\" class=\"other-project-link\" href=\"#\">"
+            "<div class=\"other-project-icon\"><span>i</span></div>"
+            "<div id=\"t1\" class=\"other-project-text\"><span id=\"title1\" class=\"other-project-title\">Commons</span>"
+            "<span id=\"tag1\" class=\"other-project-tagline\">Free media collection</span></div></a></div>"
+            "<div id=\"p2\" class=\"other-project\"><a id=\"l2\" class=\"other-project-link\" href=\"#\">"
+            "<div class=\"other-project-icon\"><span>i</span></div>"
+            "<div class=\"other-project-text\"><span class=\"other-project-title\">Wikivoyage</span>"
+            "<span class=\"other-project-tagline\">Free travel guide</span></div></a></div>"
+            "<div id=\"p3\" class=\"other-project\"><a id=\"l3\" class=\"other-project-link\" href=\"#\">"
+            "<div class=\"other-project-icon\"><span>i</span></div>"
+            "<div class=\"other-project-text\"><span class=\"other-project-title\">Wiktionary</span>"
+            "<span class=\"other-project-tagline\">Free dictionary</span></div></a></div>"
+            "</nav></body></html>");
+        auto psheet = ParseStylesheet(
+            ".other-projects{display:inline-block;width:650px;}"
+            ".other-project{float:left;position:relative;width:33%;height:9rem;}"
+            ".other-project-link{display:inline-block;min-height:50px;width:90%;padding:1em;white-space:nowrap;}"
+            ".other-project-icon{display:inline-block;width:50px;text-align:center;}"
+            ".other-project-text{display:inline-block;max-width:65%;font-size:1.4rem;vertical-align:middle;white-space:normal;}"
+            ".other-project-tagline,.other-project-title{display:block;}"
+            ".other-project-tagline{font-size:1.3rem;}");
+        LayoutInput pin; pin.document = pdom.get(); pin.sheet = &psheet;
+        pin.measure = &measure; pin.viewportW = 1000.f; pin.viewportH = 800.f;
+        auto pl = LayoutDocument(pin);
+        auto* p1 = FindEngineBoxById(pl.get(), "p1");
+        auto* p2 = FindEngineBoxById(pl.get(), "p2");
+        auto* p3 = FindEngineBoxById(pl.get(), "p3");
+        auto* l1 = FindEngineBoxById(pl.get(), "l1");
+        auto* l2 = FindEngineBoxById(pl.get(), "l2");
+        auto* l3 = FindEngineBoxById(pl.get(), "l3");
+        auto* title = FindEngineBoxById(pl.get(), "title1");
+        auto* tagline = FindEngineBoxById(pl.get(), "tag1");
+        bool packed = p1 && p2 && p3
+            && p2->x >= p1->x + p1->borderBoxW() - 1.f
+            && p3->x >= p2->x + p2->borderBoxW() - 1.f
+            && std::abs(p2->y - p1->y) < 1.f
+            && std::abs(p3->y - p1->y) < 1.f;
+        bool childrenMoved = p1 && p2 && p3 && l1 && l2 && l3
+            && std::abs(l1->x - p1->x) < 1.f
+            && std::abs(l2->x - p2->x) < 1.f
+            && std::abs(l3->x - p3->x) < 1.f;
+        bool stacked = title && tagline
+            && tagline->y >= title->y + title->borderBoxH() - 0.5f;
+        ExpectEqual("layout-engine/wikipedia-project-floats-pack-and-stack-text",
+            packed && childrenMoved && stacked ? "stable\n" : "overlap\n",
+            "stable\n",
+            result);
+    }
     return result;
 }

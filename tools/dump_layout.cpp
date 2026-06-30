@@ -52,6 +52,7 @@ static Stylesheet CollectCss(const Node* root) {
         for (auto& c : n->children) walk(c.get());
     };
     walk(root);
+    sheet.rebuildRuleBuckets();
     return sheet;
 }
 
