@@ -231,6 +231,10 @@ static Stylesheet CollectCSS(const Node* root) {
         if (n->type == NodeType::Element && n->tagName == "style") {
             std::string css; for (auto& c : n->children) if (c->type == NodeType::Text) css += c->text;
             auto part = ParseStylesheet(css);
+            if (part.rootRemBaseSet) {
+                sheet.rootRemBase = part.rootRemBase;
+                sheet.rootRemBaseSet = true;
+            }
             for (auto& r : part.rules) sheet.rules.push_back(r);
         }
         for (auto& c : n->children) walk(c.get());

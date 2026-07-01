@@ -10,6 +10,8 @@
 // this after each selector: a declaration on one element never changes the
 // inherited font size of unrelated selectors.
 static float g_emBase = 16.f;
+static float g_remBase = 16.f;
+static int g_parseDepth = 0;
 static const Node* g_hoverNodeCss = nullptr;
 static const Node* g_focusNodeCss = nullptr;
 void SetCssHoverNode(const Node* node) { g_hoverNodeCss = node; }
@@ -115,7 +117,7 @@ static float ParseLength(const std::string& raw, float emBase = -1.f) {
     while (!unit.empty() && unit[0] == ' ') unit.erase(unit.begin());
     if (unit.empty() || unit == "px") return num;
     if (unit == "em") return num * emBase;
-    if (unit == "rem") return num * 16.f;  // rem always resolves against root font size (16px)
+    if (unit == "rem") return num * g_remBase;
     if (unit == "pt")  return num * 1.333f;
     if (unit == "pc")  return num * emBase;
     if (unit == "in")  return num * 96.f;
@@ -1946,6 +1948,7 @@ static std::vector<const CssRule*> candidateRulesFor(const Stylesheet& sheet, co
 }
 
 ComputedStyle Stylesheet::resolve(const Node* node) const {
+    g_remBase = rootRemBase;
     // Collect matching rules, sorted by specificity
     std::vector<const CssRule*> matched;
     for (auto* rule : candidateRulesFor(*this, node)) {
@@ -2429,7 +2432,11 @@ static bool SupportsConditionMatches(std::string raw) {
 }
 
 Stylesheet ParseStylesheet(const std::string& rawCss) {
-    g_emBase = 16.f;  // reset per stylesheet
+    const bool topLevelParse = (g_parseDepth++ == 0);
+    if (topLevelParse) {
+        g_emBase = 16.f;
+        g_remBase = 16.f;
+    }
     Stylesheet sheet;
     std::string css = stripComments(rawCss);
 
@@ -2454,8 +2461,14 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
                 if (header.rfind("@media", 0) == 0) {
                     const auto conditions = ParseMediaConditions(header.substr(6));
                     const float outerEmBase = g_emBase;
+                    const float outerRemBase = g_remBase;
                     Stylesheet nested = ParseStylesheet(css.substr(lbPos + 1, rbPos - lbPos - 1));
                     g_emBase = outerEmBase;
+                    g_remBase = outerRemBase;
+                    if (nested.rootRemBaseSet) {
+                        sheet.rootRemBase = nested.rootRemBase;
+                        sheet.rootRemBaseSet = true;
+                    }
                     for (auto& rule : nested.rules) {
                         rule.media = CombineMediaConditions(conditions, rule.media);
                         sheet.rules.push_back(std::move(rule));
@@ -2463,8 +2476,14 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
                 } else if (header.rfind("@supports", 0) == 0) {
                     if (SupportsConditionMatches(header.substr(9))) {
                         const float outerEmBase = g_emBase;
+                        const float outerRemBase = g_remBase;
                         Stylesheet nested = ParseStylesheet(css.substr(lbPos + 1, rbPos - lbPos - 1));
                         g_emBase = outerEmBase;
+                        g_remBase = outerRemBase;
+                        if (nested.rootRemBaseSet) {
+                            sheet.rootRemBase = nested.rootRemBase;
+                            sheet.rootRemBaseSet = true;
+                        }
                         for (auto& rule : nested.rules)
                             sheet.rules.push_back(std::move(rule));
                     }
@@ -2549,6 +2568,8 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
         // the inherited/root basis first, then resolve all remaining lengths
         // against that element-local basis.
         const float inheritedEmBase = g_emBase;
+        const float inheritedRemBase = g_remBase;
+        const bool rootSelector = (selectorBlock == "html" || selectorBlock == ":root");
         const auto declarations = SplitDeclarations(declBlock);
         ComputedStyle declStyle;
         g_emBase = inheritedEmBase;
@@ -2563,6 +2584,8 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
             }
         }
         const float elementEmBase = declStyle.fontSize > 0 ? declStyle.fontSize : inheritedEmBase;
+        const bool rootSetsFontSize = rootSelector && declStyle.fontSize > 0;
+        if (rootSetsFontSize) g_remBase = elementEmBase;
         g_emBase = elementEmBase;
         for (const auto& decl : declarations) {
             size_t colon = decl.find(':');
@@ -2587,12 +2610,20 @@ Stylesheet ParseStylesheet(const std::string& rawCss) {
 
         // `html` provides the root inherited font size.  Other rules are
         // independent selectors and must not leak their local font basis.
-        if (selectorBlock == "html" || selectorBlock == ":root")
+        if (rootSelector) {
             g_emBase = elementEmBase;
-        else
+            if (rootSetsFontSize) {
+                g_remBase = elementEmBase;
+                sheet.rootRemBase = elementEmBase;
+                sheet.rootRemBaseSet = true;
+            }
+        } else {
             g_emBase = inheritedEmBase;
+            g_remBase = inheritedRemBase;
+        }
     }
     sheet.rebuildRuleBuckets();
+    g_parseDepth--;
     return sheet;
 }
 

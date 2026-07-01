@@ -490,6 +490,10 @@ Stylesheet Renderer::CollectStylesheet(const Node* root) {
             for (auto& c : n->children)
                 if (c->type == NodeType::Text) css += c->text;
             Stylesheet part = ParseStylesheet(css);
+            if (part.rootRemBaseSet) {
+                sheet.rootRemBase = part.rootRemBase;
+                sheet.rootRemBaseSet = true;
+            }
             for (auto& r : part.rules) sheet.rules.push_back(r);
         } else if (n->type == NodeType::Element && n->tagName == "link") {
             std::string rel = n->attr("rel");
@@ -501,6 +505,10 @@ Stylesheet Renderer::CollectStylesheet(const Node* root) {
                 if (hrefLow.rfind(prefix, 0) == 0) {
                     std::string css = UrlDecodeSimple(href.substr(prefix.size()));
                     Stylesheet part = ParseStylesheet(css);
+                    if (part.rootRemBaseSet) {
+                        sheet.rootRemBase = part.rootRemBase;
+                        sheet.rootRemBaseSet = true;
+                    }
                     for (auto& r : part.rules) sheet.rules.push_back(r);
                 }
             }

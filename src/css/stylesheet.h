@@ -78,6 +78,8 @@ struct Stylesheet {
     std::vector<size_t> universalRuleBucket;
     float viewportWidth = 800.f;
     float viewportHeight = 600.f;
+    float rootRemBase = 16.f;
+    bool rootRemBaseSet = false;
 
     void setViewport(float width, float height) {
         viewportWidth = width;

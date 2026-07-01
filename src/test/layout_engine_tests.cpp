@@ -505,6 +505,37 @@ TestResult RunLayoutEngineTests() {
             result);
     }
 
+    // Out-of-flow children must not participate in inline formatting. The
+    // Wikipedia portal has an absolute logo and absolute search language picker
+    // inside inline-formatting containers; if those consume inline space they
+    // shove the wordmark/search text into the wrong line.
+    {
+        auto odom = ParseHtml(
+            "<html><body><div id=\"wrap\">"
+            "<img id=\"abs\" src=\"/logo.png\" width=\"80\" height=\"80\">"
+            "<span id=\"word\">Wordmark</span>"
+            "</div></body></html>");
+        auto osheet = ParseStylesheet(
+            "#wrap { position:relative; width:200px; text-align:center; }"
+            "#abs { position:absolute; top:100px; left:0; width:80px; height:80px; }"
+            "#word { display:inline-block; width:100px; height:20px; }");
+        FixedMeasure omeasure;
+        LayoutInput oin; oin.document = odom.get(); oin.sheet = &osheet;
+        oin.measure = &omeasure; oin.viewportW = 320.f; oin.viewportH = 240.f;
+        auto ol = LayoutDocument(oin);
+        auto* wrap = FindEngineBoxById(ol.get(), "wrap");
+        auto* abs = FindEngineBoxById(ol.get(), "abs");
+        auto* word = FindEngineBoxById(ol.get(), "word");
+        bool ok = wrap && abs && word
+            && (int)(word->y - wrap->contentY() + .5f) == 0
+            && (int)(wrap->contentH + .5f) == 20
+            && (int)(abs->y - wrap->contentY() + .5f) == 100;
+        ExpectEqual("layout-engine/out-of-flow-inline-children-do-not-consume-line-space",
+            ok ? "out-of-flow\n" : "consumed\n",
+            "out-of-flow\n",
+            result);
+    }
+
     // A transformed ancestor establishes the containing block for absolutely
     // positioned descendants even when the ancestor itself is not positioned.
     {
@@ -591,6 +622,28 @@ TestResult RunLayoutEngineTests() {
         ExpectEqual("layout-engine/hidden-inputs-do-not-mangle-search-row",
             rowOk ? "hidden\n" : "visible\n",
             "hidden\n",
+            result);
+    }
+
+    {
+        auto sdom = ParseHtml(
+            "<html><body><div id=\"root\"><div id=\"picker\"><select id=\"select\"><option>Afrikaans</option></select></div></div></body></html>");
+        auto ssheet = ParseStylesheet(
+            "#root{position:relative;width:300px;height:100px;}"
+            "#picker{position:absolute;left:0;top:0;width:110px;height:24px;}"
+            "#select{width:100%;height:100%;}");
+        FixedMeasure smeasure;
+        LayoutInput sin; sin.document = sdom.get(); sin.sheet = &ssheet;
+        sin.measure = &smeasure; sin.viewportW = 400.f; sin.viewportH = 200.f;
+        auto sl = LayoutDocument(sin);
+        auto* picker = FindEngineBoxById(sl.get(), "picker");
+        auto* select = FindEngineBoxById(sl.get(), "select");
+        bool ok = picker && select
+            && (int)(picker->contentH + .5f) == 24
+            && (int)(select->contentH + .5f) == 24;
+        ExpectEqual("layout-engine/percent-height-replaced-child-uses-definite-parent-height",
+            ok ? "percent-height\n" : "intrinsic-height\n",
+            "percent-height\n",
             result);
     }
 

@@ -472,6 +472,58 @@ TestResult RunCssTests() {
     }
 
     {
+        auto dom = ParseHtml("<html><body><input id=\"search\"><select id=\"lang\"></select></body></html>");
+        auto* search = FindElementById(dom.get(), "search");
+        auto* lang = FindElementById(dom.get(), "lang");
+        auto sheet = ParseStylesheet(
+            ":root { --search-select-height: 2.4rem; } "
+            "html { font-size: 62.5%; } "
+            "#search { width: 9.6rem; height: 4.4rem; padding-left: 1.2rem; } "
+            "#lang { height: var(--search-select-height); }");
+        std::string actual = "search: ";
+        actual += search ? SerializeComputedStyle(sheet.resolve(search)) : "missing\n";
+        ComputedStyle rootStyle = sheet.resolve(FindFirstElement(dom.get(), "html"));
+        ResolveStyleVariables(rootStyle);
+        ComputedStyle langStyle = rootStyle.inherit(sheet.resolve(lang));
+        ResolveStyleVariables(langStyle);
+        actual += "lang: ";
+        actual += lang ? SerializeComputedStyle(langStyle) : "missing\n";
+        ExpectEqual("css/cascade/rem-lengths-use-root-font-size",
+            actual,
+            "search: paddingLeft=12 width=96 height=44 \n"
+            "lang: fontSize=10 height=24 \n",
+            result);
+    }
+
+    {
+        auto dom = ParseHtml("<html><body><div id=\"control\"></div></body></html>");
+        auto* root = FindFirstElement(dom.get(), "html");
+        auto* control = FindElementById(dom.get(), "control");
+        auto base = ParseStylesheet(":root { --control-height: 2.4rem; } html { font-size: 62.5%; }");
+        auto later = ParseStylesheet("#control { height: var(--control-height); }");
+        Stylesheet sheet;
+        if (base.rootRemBaseSet) {
+            sheet.rootRemBase = base.rootRemBase;
+            sheet.rootRemBaseSet = true;
+        }
+        for (auto& rule : base.rules) sheet.rules.push_back(rule);
+        if (later.rootRemBaseSet) {
+            sheet.rootRemBase = later.rootRemBase;
+            sheet.rootRemBaseSet = true;
+        }
+        for (auto& rule : later.rules) sheet.rules.push_back(rule);
+        sheet.rebuildRuleBuckets();
+        ComputedStyle rootStyle = sheet.resolve(root);
+        ResolveStyleVariables(rootStyle);
+        ComputedStyle controlStyle = rootStyle.inherit(sheet.resolve(control));
+        ResolveStyleVariables(controlStyle);
+        ExpectEqual("css/cascade/rem-base-survives-multiple-stylesheets",
+            SerializeComputedStyle(controlStyle),
+            "fontSize=10 height=24 \n",
+            result);
+    }
+
+    {
         auto dom = ParseHtml("<html><body><div id=\"target\"></div></body></html>");
         auto* rootNode = FindFirstElement(dom.get(), "html");
         auto* target = FindElementById(dom.get(), "target");

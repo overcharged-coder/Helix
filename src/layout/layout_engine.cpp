@@ -1046,6 +1046,11 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
             if (f.bottom > box.contentY()) fctx.floats.push_back(f);
     }
     const size_t inheritedFloatCount = fctx.floats.size();
+    const float specifiedHeight = usedHeight(box.style, -1.f);
+    const float verticalBp = box.borderTop + box.padTop + box.borderBottom + box.padBottom;
+    const float childCbH = specifiedHeight >= 0
+        ? ((box.style.boxSizing == 1) ? std::max(0.f, specifiedHeight - verticalBp) : specifiedHeight)
+        : -1.f;
 
     float cursorY = box.contentY();
     float prevMarginBottom = 0;
@@ -1063,7 +1068,7 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
                         : (box.contentW / std::max(1, cells));
             k->y = cursorY;
             std::vector<LayoutBox*> pos;
-            layoutBox(*k, x, cellW, -1, pos, &fctx);
+            layoutBox(*k, x, cellW, childCbH, pos, &fctx);
             for (auto* p : pos) positionedOut.push_back(p);
             maxH = std::max(maxH, k->marginBoxH());
             x += k->marginBoxW();
@@ -1089,7 +1094,7 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
                 fy = fctx.clearTo(fy, k->style.clearMode);
             std::vector<LayoutBox*> pos;
             // Floats with auto width shrink-to-fit their content.
-            layoutBox(*k, box.contentX(), box.contentW, -1.f, pos, &fctx, /*shrinkToFit=*/true);
+            layoutBox(*k, box.contentX(), box.contentW, childCbH, pos, &fctx, /*shrinkToFit=*/true);
             for (auto* p : pos) positionedOut.push_back(p);
             float fw = k->marginBoxW();
             // Find a vertical band where the float fits horizontally.
@@ -1125,7 +1130,7 @@ void Engine::layoutBlockChildren(LayoutBox& box, std::vector<LayoutBox*>& positi
 
         k->y = cursorY;  // border-box top
         std::vector<LayoutBox*> pos;
-        layoutBox(*k, box.contentX(), box.contentW, -1.f, pos, &fctx);
+        layoutBox(*k, box.contentX(), box.contentW, childCbH, pos, &fctx);
         for (auto* p : pos) positionedOut.push_back(p);
 
         cursorY = k->y + k->borderBoxH();
@@ -1600,8 +1605,9 @@ struct InlineItem {
 // vertical-align of the enclosing inline box down to its text/atomic descendants,
 // since vertical-align applies to the inline element, not the text node it wraps.
 static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& items,
-                          int parentVAlign = 0, float parentW = 1e6f) {
+                          int parentVAlign = 0, float parentW = 1e6f, float parentH = -1.f) {
     DepthScope _d; if (g_depth > kMaxDepth) return;
+    if (box->isOutOfFlow()) return;
     int va = box->style.verticalAlignSet ? box->style.verticalAlign : parentVAlign;
     if (box->kind == BoxKind::Text) {
         FontKey f = E.fontFor(box->style);
@@ -1643,8 +1649,10 @@ static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& it
         // (otherwise shrink-to-fit with a huge available width).
         float cbW = (box->style.widthPercent >= 0 || box->style.widthCalcPercent >= 0 || box->style.maxWidthPercent >= 0)
                   ? parentW : 1e6f;
+        float cbH = (box->style.heightPercent >= 0 || box->style.minHeightPercent >= 0 || box->style.maxHeightPercent >= 0)
+                  ? parentH : -1.f;
         std::vector<LayoutBox*> pos;
-        E.layoutBox(*box, 0, cbW, -1, pos, nullptr);
+        E.layoutBox(*box, 0, cbW, cbH, pos, nullptr);
         InlineItem it; it.type = InlineItem::Atomic; it.box = box;
         it.width = box->marginBoxW();
         FontKey f = E.fontFor(box->style);
@@ -1655,13 +1663,18 @@ static void CollectInline(Engine& E, LayoutBox* box, std::vector<InlineItem>& it
         return;
     }
     // Inline box (span/a/em…): recurse into children, carrying its vertical-align.
-    for (auto& k : box->kids) CollectInline(E, k.get(), items, va, parentW);
+    for (auto& k : box->kids) CollectInline(E, k.get(), items, va, parentW, parentH);
 }
 
 float Engine::layoutInline(LayoutBox& box, FloatCtx* fctx) {
     DepthScope _d; if (g_depth > kMaxDepth) return 0;
     std::vector<InlineItem> items;
-    for (auto& k : box.kids) CollectInline(*this, k.get(), items, 0, box.contentW);
+    float inlineCbH = usedHeight(box.style, -1.f);
+    if (inlineCbH >= 0 && box.style.boxSizing == 1) {
+        const float vbp = box.borderTop + box.padTop + box.borderBottom + box.padBottom;
+        inlineCbH = std::max(0.f, inlineCbH - vbp);
+    }
+    for (auto& k : box.kids) CollectInline(*this, k.get(), items, 0, box.contentW, inlineCbH);
 
     float cLeft  = box.contentX();
     float cRight = box.contentX() + box.contentW;
