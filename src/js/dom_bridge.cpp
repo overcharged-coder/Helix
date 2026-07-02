@@ -77,6 +77,7 @@ static std::unordered_map<Node*, std::shared_ptr<Node>> g_nodeStore;
 static std::unordered_map<Node*, JsObject*> g_wrapperStore;
 static std::unordered_set<JsObject*> g_datasetObjects;
 static std::unordered_set<JsObject*> g_readyWrappers;
+static std::shared_ptr<Node> g_currentDocument;
 static const char* kNamespaceAttr = "__helix_namespaceURI";
 
 // Event listeners: node -> [(eventName, callbackFn), ...]
@@ -176,6 +177,22 @@ static bool nodeContains(Node* root, Node* needle) {
     for (Node* cur = needle; cur; cur = cur->parent)
         if (cur == root) return true;
     return false;
+}
+
+static Node* rootNode(Node* n) {
+    while (n && n->parent) n = n->parent;
+    return n;
+}
+
+static Node* ownerDocumentNode(Node* n) {
+    Node* root = rootNode(n);
+    if (root && root->type == NodeType::Document) return root;
+    return g_currentDocument.get();
+}
+
+static bool isConnectedNode(Node* n) {
+    Node* root = rootNode(n);
+    return root && root->type == NodeType::Document;
 }
 
 static Node* siblingNode(Node* node, int direction) {
@@ -764,6 +781,63 @@ static Node* previousElementSibling(const Node* n) {
     return nullptr;
 }
 
+static std::vector<Node*> typeSiblings(const Node* n) {
+    std::vector<Node*> out;
+    if (!n || !n->parent) return out;
+    std::string tag = lowerCopy(n->tagName);
+    for (const auto& child : n->parent->children) {
+        if (child && child->type == NodeType::Element && lowerCopy(child->tagName) == tag)
+            out.push_back(child.get());
+    }
+    return out;
+}
+
+static int indexInList(Node* n, const std::vector<Node*>& nodes, bool fromEnd) {
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i] != n) continue;
+        return fromEnd ? (int)(nodes.size() - i) : (int)i + 1;
+    }
+    return 0;
+}
+
+static bool parseNthExpression(std::string expr, int& a, int& b) {
+    expr = lowerCopy(trimCopy(expr));
+    expr.erase(std::remove_if(expr.begin(), expr.end(),
+        [](unsigned char c) { return std::isspace(c); }), expr.end());
+    if (expr.empty()) return false;
+    if (expr == "odd") { a = 2; b = 1; return true; }
+    if (expr == "even") { a = 2; b = 0; return true; }
+
+    size_t npos = expr.find('n');
+    try {
+        if (npos == std::string::npos) {
+            a = 0;
+            b = std::stoi(expr);
+            return true;
+        }
+        std::string coeff = expr.substr(0, npos);
+        if (coeff.empty() || coeff == "+") a = 1;
+        else if (coeff == "-") a = -1;
+        else a = std::stoi(coeff);
+
+        std::string offset = expr.substr(npos + 1);
+        b = offset.empty() ? 0 : std::stoi(offset);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool nthMatches(int index, const std::string& expr) {
+    int a = 0, b = 0;
+    if (index <= 0 || !parseNthExpression(expr, a, b)) return false;
+    if (a == 0) return index == b;
+    int diff = index - b;
+    if (diff % a != 0) return false;
+    int n = diff / a;
+    return n >= 0;
+}
+
 static bool attrMatches(const Node* n, const std::string& raw) {
     std::string expr = trimCopy(raw);
     if (expr.empty()) return false;
@@ -822,6 +896,20 @@ static bool matchesPseudo(Node* n, const std::string& name, const std::string& a
         if (name == "first-child") return siblings.front() == n;
         if (name == "last-child") return siblings.back() == n;
         return siblings.size() == 1 && siblings.front() == n;
+    }
+    if (name == "first-of-type" || name == "last-of-type" || name == "only-of-type") {
+        auto siblings = typeSiblings(n);
+        if (siblings.empty()) return false;
+        if (name == "first-of-type") return siblings.front() == n;
+        if (name == "last-of-type") return siblings.back() == n;
+        return siblings.size() == 1 && siblings.front() == n;
+    }
+    if (name == "nth-child" || name == "nth-last-child"
+        || name == "nth-of-type" || name == "nth-last-of-type") {
+        bool ofType = name.find("of-type") != std::string::npos;
+        bool fromEnd = name.find("nth-last") == 0;
+        auto siblings = ofType ? typeSiblings(n) : elementSiblings(n);
+        return nthMatches(indexInList(n, siblings, fromEnd), arg);
     }
     if (name == "root") return n->parent && n->parent->type == NodeType::Document;
     if (name == "scope") return n == scope;
@@ -996,9 +1084,12 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
     if (node->type == NodeType::Text) {
         obj->setProp("nodeType", JsValue::integer(3));
         obj->setProp("nodeName", vm.str("#text"));
+        obj->setProp("data", vm.str(node->text));
+        obj->setProp("nodeValue", vm.str(node->text));
     } else if (node->type == NodeType::Document) {
         obj->setProp("nodeType", JsValue::integer(9));
         obj->setProp("nodeName", vm.str("#document"));
+        obj->setProp("nodeValue", JsValue::null());
     } else {
         obj->setProp("nodeType", JsValue::integer(1));
         obj->setProp("nodeName", vm.str(node->tagName));
@@ -1007,6 +1098,7 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         obj->setProp("namespaceURI", node->attrs.count(kNamespaceAttr)
             ? vm.str(node->attr(kNamespaceAttr))
             : JsValue::null());
+        obj->setProp("nodeValue", JsValue::null());
     }
 
     // ── id/className ──
@@ -1577,6 +1669,14 @@ static JsValue wrapNodeInternal(VM& vm, std::shared_ptr<Node> node, bool materia
         Node* n = unwrapNode(thisVal);
         Node* other = unwrapNode(ARG(0));
         return JsValue::boolean(nodeContains(n, other));
+    });
+    addNativeM("isSameNode", NATIVE("isSameNode") {
+        return JsValue::boolean(unwrapNode(thisVal) == unwrapNode(ARG(0)));
+    });
+    addNativeM("getRootNode", NATIVE("getRootNode") {
+        Node* root = rootNode(unwrapNode(thisVal));
+        auto shared = getShared(root);
+        return shared ? wrapNode(vm, shared) : JsValue::null();
     });
 
     addNativeM("getBoundingClientRect", NATIVE("getBoundingClientRect") {
@@ -2191,6 +2291,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
     g_domCallbacks = std::move(callbacks);
     g_windowScrollX = 0.f;
     g_windowScrollY = 0.f;
+    g_currentDocument = docNode;
 
     // Reflect live JS property writes onto the backing DOM node.
     vm.onDomPropSet = [vmPtr = &vm, pageUrl](JsObject* wrapper, const std::string& key, JsValue val) {
@@ -2217,6 +2318,15 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         if (key == "className" || key == "class") n->attrs["class"] = val.toString();
         else if (key == "id")    n->attrs["id"] = val.toString();
         else if (key == "value") n->attrs["value"] = val.toString();
+        else if (n->type == NodeType::Text
+            && (key == "data" || key == "nodeValue" || key == "textContent")) {
+            n->text = val.toString();
+            wrapper->setProp("data", vmPtr->str(n->text));
+            wrapper->setProp("nodeValue", vmPtr->str(n->text));
+            wrapper->setProp("textContent", vmPtr->str(n->text));
+            markDomDirty(*vmPtr, n->parent ? n->parent : n, "characterData");
+            return;
+        }
         else if (key == "checked") {
             if (val.toBool()) n->attrs["checked"] = "checked";
             else n->attrs.erase("checked");
@@ -2259,6 +2369,28 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         if (key == "className") { out = vmPtr->str(n->attr("class")); return true; }
         if (key == "id")        { out = vmPtr->str(n->attr("id"));    return true; }
         if (key == "value")     { out = vmPtr->str(n->attr("value")); return true; }
+        if (n->type == NodeType::Text && (key == "data" || key == "nodeValue" || key == "textContent")) {
+            out = vmPtr->str(n->text);
+            return true;
+        }
+        if (key == "textContent") {
+            out = vmPtr->str(textContent(n));
+            return true;
+        }
+        if (key == "nodeValue") {
+            out = JsValue::null();
+            return true;
+        }
+        if (key == "isConnected") {
+            out = JsValue::boolean(isConnectedNode(n));
+            return true;
+        }
+        if (key == "ownerDocument") {
+            Node* doc = ownerDocumentNode(n);
+            auto shared = getShared(doc);
+            out = shared ? wrapNodeInternal(*vmPtr, shared, false) : JsValue::null();
+            return true;
+        }
         if (key == "checked")   { out = JsValue::boolean(hasAttr(n, "checked")); return true; }
         if (key == "disabled")  { out = JsValue::boolean(hasAttr(n, "disabled")); return true; }
         if (key == "namespaceURI") {

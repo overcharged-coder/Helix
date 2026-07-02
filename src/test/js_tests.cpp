@@ -279,6 +279,12 @@ static std::string RunDomSelectorCompatibilitySnapshot() {
         "<a class=\"mw-list-item selected\" href=\"#History\">History</a>"
         "</div>"
         "</section>"
+        "<ul id=\"toc-list\">"
+        "<li class=\"tocitem\">Intro</li>"
+        "<li class=\"tocitem\">History</li>"
+        "<li class=\"tocitem\">Refs</li>"
+        "</ul>"
+        "<aside><em id=\"solo\">Only</em></aside>"
         "</div>"
         "</main>"
         "</body></html>");
@@ -290,6 +296,10 @@ static std::string RunDomSelectorCompatibilitySnapshot() {
         "var toggle = document.querySelector('input.vector-dropdown-checkbox:checked');\n"
         "out = out + '|' + (toggle && toggle.matches('input:is(.vector-dropdown-checkbox, .other):not([disabled])') ? 'match' : 'nomatch');\n"
         "out = out + '|' + document.querySelector('[href^=\"#Hist\"]').getAttribute('href');\n"
+        "out = out + '|' + document.querySelectorAll('#toc-list > li:nth-child(2n+1)').length;\n"
+        "out = out + '|' + document.querySelector('#toc-list > li:nth-of-type(2)').textContent;\n"
+        "out = out + '|' + document.querySelector('#toc-list > li:last-of-type').textContent;\n"
+        "out = out + '|' + (document.getElementById('solo').matches('em:only-of-type') ? 'only' : 'not-only');\n"
         "document.getElementsByTagName('body')[0].setAttribute('data-result', out);\n",
         "selector-compat");
     if (!ok) return "script failed\n";
@@ -672,6 +682,25 @@ static std::string RunDomFragmentCloneMutationSnapshot() {
     return body ? body->attr("data-result") + "|direct=" + direct + "\n" : "missing body\n";
 }
 
+static std::string RunDomNodeSurfaceSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body><div id=\"root\">old</div></body></html>");
+    engine.setDocument(dom, []() {});
+    bool ok = engine.runScript(
+        "var root = document.getElementById('root');\n"
+        "var text = root.firstChild;\n"
+        "var loose = document.createElement('section');\n"
+        "text.data = 'new';\n"
+        "var same = root.isSameNode(document.querySelector('#root'));\n"
+        "var roots = root.getRootNode().nodeType + ':' + text.ownerDocument.nodeType + ':' + loose.ownerDocument.nodeType;\n"
+        "var connected = root.isConnected + ':' + loose.isConnected;\n"
+        "document.body.setAttribute('data-result', same + '|' + roots + '|' + connected + '|' + text.nodeValue + '|' + root.textContent);\n",
+        "dom-node-surface");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
 static std::string RunDomDispatchEventPropertyHandlerSnapshot() {
     JsEngine engine;
     auto dom = ParseHtml("<html><body><div id=\"outer\"><button id=\"btn\"></button></div></body></html>");
@@ -928,7 +957,7 @@ TestResult RunJsTests() {
     ExpectEqual(
         "js/dom/selector-compatibility",
         RunDomSelectorCompatibilitySnapshot(),
-        "body|History|2|match|#History\n",
+        "body|History|2|match|#History|2|History|Refs|only\n",
         result);
 
     ExpectEqual(
@@ -1017,6 +1046,12 @@ TestResult RunJsTests() {
         "js/dom/fragments-deep-clone-and-contains",
         RunDomFragmentCloneMutationSnapshot(),
         "Source|empty|true|true|direct=p#frag-child,div#deep,div#shallow\n",
+        result);
+
+    ExpectEqual(
+        "js/dom/node-surface-connectivity-and-identity",
+        RunDomNodeSurfaceSnapshot(),
+        "true|9:9:9|true:false|new|new\n",
         result);
 
     ExpectEqual(
