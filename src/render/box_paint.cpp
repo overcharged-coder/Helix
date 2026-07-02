@@ -312,14 +312,18 @@ void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float to
             float cy = box.contentY() - scrollY + topInset;
             float cw = box.contentW;
             float ch = box.contentH;
-            auto* fill = TempBrush(s.bgColor.valid ? ToD2Dc(s.bgColor)
-                : (tag == "button"
+            bool authorPaintedChrome = s.bgColor.valid || s.borderColor.valid
+                || box.borderTop > 0.01f || box.borderRight > 0.01f
+                || box.borderBottom > 0.01f || box.borderLeft > 0.01f;
+            bool drawNativeChrome = !authorPaintedChrome;
+            if (drawNativeChrome) {
+                auto* fill = TempBrush(tag == "button"
                     ? D2D1::ColorF(0.94f, 0.94f, 0.94f, 1.f)
-                    : D2D1::ColorF(1.f, 1.f, 1.f, 1.f)));
-            auto* border = TempBrush(s.borderColor.valid ? ToD2Dc(s.borderColor)
-                : D2D1::ColorF(0.62f, 0.62f, 0.62f, 1.f));
-            if (fill) m_rt->FillRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), fill);
-            if (border) m_rt->DrawRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), border, 1.f);
+                    : D2D1::ColorF(1.f, 1.f, 1.f, 1.f));
+                auto* border = TempBrush(D2D1::ColorF(0.62f, 0.62f, 0.62f, 1.f));
+                if (fill) m_rt->FillRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), fill);
+                if (border) m_rt->DrawRectangle(D2D1::RectF(cx, cy, cx + cw, cy + ch), border, 1.f);
+            }
 
             std::wstring label;
             if ((tag == "button" && !FormControlHasSpriteDescendant(box.node)) || tag == "select")
@@ -347,7 +351,7 @@ void Renderer::PaintBoxDecorations(const LayoutBox& box, float scrollY, float to
                     }
                 }
             }
-            if (tag == "select") {
+            if (tag == "select" && drawNativeChrome) {
                 auto* arrow = TempBrush(D2D1::ColorF(0.2f, 0.2f, 0.2f, 1.f));
                 if (arrow) {
                     float ax = cx + cw - 15.f;

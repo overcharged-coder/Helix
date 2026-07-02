@@ -239,12 +239,17 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
             float cw = box.contentW;
             float ch = box.contentH;
             bool focused = (ps.form->focusedInput == box.node);
-            // Draw input background + border.
-            ps.r->FillRect(cx, cy, cw, ch,
-                tag == "button" ? PlatColor{0.94f,0.94f,0.94f,1.f}
-                                : PlatColor{1.f,1.f,1.f,1.f});
-            PlatColor border = focused ? PlatColor{0.2f,0.4f,0.8f,1} : PlatColor{0.7f,0.7f,0.7f,1};
-            ps.r->DrawRect(cx, cy, cw, ch, border, focused ? 2.f : 1.f);
+            bool authorPaintedChrome = s.bgColor.valid || s.borderColor.valid
+                || box.borderTop > 0.01f || box.borderRight > 0.01f
+                || box.borderBottom > 0.01f || box.borderLeft > 0.01f;
+            bool drawNativeChrome = !authorPaintedChrome;
+            if (drawNativeChrome) {
+                ps.r->FillRect(cx, cy, cw, ch,
+                    tag == "button" ? PlatColor{0.94f,0.94f,0.94f,1.f}
+                                    : PlatColor{1.f,1.f,1.f,1.f});
+                PlatColor border = focused ? PlatColor{0.2f,0.4f,0.8f,1} : PlatColor{0.7f,0.7f,0.7f,1};
+                ps.r->DrawRect(cx, cy, cw, ch, border, focused ? 2.f : 1.f);
+            }
             if (tag == "button" || tag == "select") {
                 FontKey fk; fk.size = std::max(1.f, (s.fontSize > 0 ? s.fontSize : 14.f));
                 fk.bold = s.bold; fk.italic = s.italic; fk.family = s.fontFamily;
@@ -252,7 +257,7 @@ inline void PaintBoxDecorations(PaintState& ps, const LayoutBox& box) {
                 std::wstring label = NodeTextContentWide(box.node);
                 if (!label.empty())
                     ps.r->DrawText(label, cx + 8, cy + 2, cw - 16, ch - 4, font, {0.08f,0.08f,0.08f,1});
-                if (tag == "select") {
+                if (tag == "select" && drawNativeChrome) {
                     float ax = cx + cw - 15.f;
                     float ay = cy + ch * 0.5f - 2.f;
                     ps.r->DrawLine(ax, ay, ax + 4.f, ay + 4.f, {0.2f,0.2f,0.2f,1}, 1.5f);
