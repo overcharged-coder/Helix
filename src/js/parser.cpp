@@ -51,6 +51,46 @@ static std::string TokenText(const Token& token) {
     case TT::MinusMinus: return "--";
     case TT::Instanceof: return "instanceof";
     case TT::In: return "in";
+    case TT::Var: return "var";
+    case TT::Let: return "let";
+    case TT::Const: return "const";
+    case TT::Function: return "function";
+    case TT::Return: return "return";
+    case TT::If: return "if";
+    case TT::Else: return "else";
+    case TT::While: return "while";
+    case TT::For: return "for";
+    case TT::Do: return "do";
+    case TT::Break: return "break";
+    case TT::Continue: return "continue";
+    case TT::Switch: return "switch";
+    case TT::Case: return "case";
+    case TT::Default: return "default";
+    case TT::Throw: return "throw";
+    case TT::Try: return "try";
+    case TT::Catch: return "catch";
+    case TT::Finally: return "finally";
+    case TT::New: return "new";
+    case TT::Delete: return "delete";
+    case TT::Typeof: return "typeof";
+    case TT::Void: return "void";
+    case TT::Of: return "of";
+    case TT::Import: return "import";
+    case TT::Export: return "export";
+    case TT::Class: return "class";
+    case TT::Extends: return "extends";
+    case TT::Super: return "super";
+    case TT::This: return "this";
+    case TT::Yield: return "yield";
+    case TT::Async: return "async";
+    case TT::Await: return "await";
+    case TT::Debugger: return "debugger";
+    case TT::With: return "with";
+    case TT::Static: return "static";
+    case TT::True: return "true";
+    case TT::False: return "false";
+    case TT::Null: return "null";
+    case TT::Undefined: return "undefined";
     default: return "";
     }
 }
@@ -658,7 +698,7 @@ ExprPtr Parser::parseCallMember(ExprPtr base) {
             }
             // ?.prop or .prop
             std::string prop;
-            if (check(TT::Ident) || cur().isKeyword()) prop = consume().value;
+            if (check(TT::Ident) || cur().isKeyword()) prop = TokenText(consume());
             else throw ParseError("expected property name", line());
             auto propExpr = std::make_unique<Expr>(LiteralExpr{0, prop, false,false,false,false,false,true}, ln);
             base = std::make_unique<Expr>(MemberExpr{std::move(base), std::move(propExpr), false, optional}, ln);
@@ -804,7 +844,7 @@ ExprPtr Parser::parsePrimary() {
         while (check(TT::Dot) || check(TT::LBracket)) {
             if (check(TT::Dot)) {
                 consume();
-                std::string prop = (check(TT::Ident)||cur().isKeyword()) ? consume().value : "";
+                std::string prop = (check(TT::Ident)||cur().isKeyword()) ? TokenText(consume()) : "";
                 LiteralExpr l; l.isStr=true; l.strVal=prop;
                 callee = std::make_unique<Expr>(MemberExpr{std::move(callee), std::make_unique<Expr>(l,ln), false}, ln);
             } else {

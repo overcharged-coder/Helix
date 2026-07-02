@@ -186,6 +186,46 @@ static std::string RunObserverLifecycleSnapshot() {
     return body ? body->attr("data-result") + "\n" : "missing body\n";
 }
 
+static std::string RunObserverOptionsSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body><div id=\"box\" style=\"width:10px; height:20px\"></div></body></html>");
+    engine.setDocument(dom, []() {});
+    bool ok = engine.runScript(
+        "var box = document.getElementById('box');\n"
+        "var ioResult = 'missing';\n"
+        "var io = new IntersectionObserver(function(records) {\n"
+        "  ioResult = this.thresholds.join(',') + ':' + this.rootMargin + ':' + records[0].intersectionRatio + ':' + !!records[0].boundingClientRect;\n"
+        "}, { rootMargin: '1px 2px', threshold: [0, 0.5, 1] });\n"
+        "io.observe(box);\n"
+        "var roResult = 'missing';\n"
+        "var ro = new ResizeObserver(function(records) {\n"
+        "  roResult = records[0].contentBoxSize.length + ':' + records[0].borderBoxSize.length + ':' + records[0].devicePixelContentBoxSize.length;\n"
+        "});\n"
+        "ro.observe(box);\n"
+        "document.body.setAttribute('data-result', ioResult + '|' + roResult);\n",
+        "observer-options");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
+static std::string RunWindowLifecycleSurfaceSnapshot() {
+    JsEngine engine;
+    auto dom = ParseHtml("<html><body></body></html>");
+    engine.setDocument(dom, []() {}, "https://example.org/wiki/Page");
+    bool ok = engine.runScript(
+        "var popup = open('/wiki/Popup', 'docs');\n"
+        "var before = closed + ':' + (opener === null) + ':' + popup.name + ':' + popup.opener.location.href;\n"
+        "popup.close();\n"
+        "close();\n"
+        "focus(); blur(); print();\n"
+        "document.body.setAttribute('data-result', before + '|' + popup.closed + ':' + closed);\n",
+        "window-lifecycle-surface");
+    if (!ok) return "script failed\n";
+    Node* body = FindByTag(dom.get(), "body");
+    return body ? body->attr("data-result") + "\n" : "missing body\n";
+}
+
 static std::string RunDomDirtyCoalescingSnapshot() {
     JsEngine engine;
     int repaintCount = 0;
@@ -1070,6 +1110,18 @@ TestResult RunJsTests() {
         result);
 
     ExpectEqual(
+        "js/dom/observer-options-and-size-aliases",
+        RunObserverOptionsSnapshot(),
+        "0,0.5,1:1px 2px:1:true|1:1:1\n",
+        result);
+
+    ExpectEqual(
+        "js/window/lifecycle-surface",
+        RunWindowLifecycleSurfaceSnapshot(),
+        "false:true:docs:https://example.org/wiki/Page|true:true\n",
+        result);
+
+    ExpectEqual(
         "js/dom/direct-property-writes-coalesce-repaint",
         RunDomDirtyCoalescingSnapshot(),
         "1\n",
@@ -1128,6 +1180,17 @@ TestResult RunJsTests() {
         "ws.add(a);\n"
         "__result = wm.get(a) + ':' + wm.get(b) + ':' + wm.has({}) + ':' + ws.has(a) + ':' + ws.has(b);\n",
         "string: a:b:false:true:false\n",
+        result);
+
+    ExpectJsResult(
+        "symbol/registry-and-description-compat",
+        "var a = Symbol('topic');\n"
+        "var b = Symbol('topic');\n"
+        "var sharedA = Symbol.for('mediawiki');\n"
+        "var sharedB = Symbol.for('mediawiki');\n"
+        "var bracket = Symbol['for']('portal');\n"
+        "__result = (a === b) + ':' + (sharedA === sharedB) + ':' + typeof sharedA + ':' + Symbol.keyFor(sharedA) + ':' + Symbol.keyFor(bracket) + ':' + Symbol.description(a) + ':' + Symbol.toString(a);\n",
+        "string: false:true:string:mediawiki:portal:topic:Symbol(topic)\n",
         result);
 
     ExpectEqual(

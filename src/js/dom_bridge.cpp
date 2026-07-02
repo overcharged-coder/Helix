@@ -2864,9 +2864,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             std::string href = resolveDomUrl(args.empty() ? "" : args[0].toString(), current);
             auto* popup = vm.gc().newObject(ObjKind::Plain);
             popup->setProp("closed", JsValue::boolean(false));
-            auto* opener = vm.gc().newObject(ObjKind::Plain);
-            opener->setProp("location", vm.getGlobal("location"));
-            popup->setProp("opener", JsValue::object(opener));
+            popup->setProp("opener", JsValue::object(vm.globals()));
             popup->setProp("name", vm.str(args.size() > 1 ? args[1].toString() : ""));
             auto* popupLocation = vm.gc().newObject(ObjKind::Plain);
             applyLocationProps(vm, popupLocation, href);
@@ -2883,14 +2881,28 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
             });
             return JsValue::object(popup);
         }, "open")));
+    vm.setGlobal("closed", JsValue::boolean(false));
+    vm.setGlobal("opener", JsValue::null());
     vm.setGlobal("close", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("window_close") { return JsValue::undefined(); }, "close")));
+        NATIVE("window_close") {
+            vm.setGlobal("closed", JsValue::boolean(true));
+            return JsValue::undefined();
+        }, "close")));
     vm.setGlobal("focus", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("window_focus") { return JsValue::undefined(); }, "focus")));
+        NATIVE("window_focus") {
+            vm.setGlobal("documentHasFocus", JsValue::boolean(true));
+            return JsValue::undefined();
+        }, "focus")));
     vm.setGlobal("blur", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("window_blur") { return JsValue::undefined(); }, "blur")));
+        NATIVE("window_blur") {
+            vm.setGlobal("documentHasFocus", JsValue::boolean(false));
+            return JsValue::undefined();
+        }, "blur")));
     vm.setGlobal("print", JsValue::object(vm.gc().newNativeFunction(
-        NATIVE("window_print") { return JsValue::undefined(); }, "print")));
+        NATIVE("window_print") {
+            vm.setGlobal("printRequested", JsValue::boolean(true));
+            return JsValue::undefined();
+        }, "print")));
     vm.setGlobal("atob", JsValue::object(vm.gc().newNativeFunction(
         NATIVE("atob") {
             // Minimal base64 decode.
@@ -3107,6 +3119,29 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
         NATIVE("IntersectionObserver") {
             auto* obs = vm.gc().newObject(ObjKind::Plain);
             obs->setProp("_callback", ARG(0));
+            obs->setProp("root", JsValue::null());
+            obs->setProp("rootMargin", vm.str("0px"));
+            auto* thresholds = newArrayWithPrototype(vm);
+            thresholds->arrayPush(JsValue::integer(0));
+            obs->setProp("thresholds", JsValue::object(thresholds));
+            if (ARG(1).isObject()) {
+                auto* options = ARG(1).asObject();
+                JsValue root = options->getProp("root");
+                if (!root.isUndefined()) obs->setProp("root", root);
+                JsValue rootMargin = options->getProp("rootMargin");
+                if (!rootMargin.isUndefined()) obs->setProp("rootMargin", vm.str(rootMargin.toString()));
+                JsValue threshold = options->getProp("threshold");
+                if (!threshold.isUndefined()) {
+                    auto* thresholdArray = newArrayWithPrototype(vm);
+                    if (threshold.isObject() && threshold.asObject()->kind == ObjKind::Array) {
+                        for (uint32_t i = 0; i < threshold.asObject()->arrayLength(); ++i)
+                            thresholdArray->arrayPush(JsValue::number(threshold.asObject()->arrayGet(i).toNumber()));
+                    } else {
+                        thresholdArray->arrayPush(JsValue::number(threshold.toNumber()));
+                    }
+                    obs->setProp("thresholds", JsValue::object(thresholdArray));
+                }
+            }
             auto observed = std::make_shared<std::vector<JsValue>>();
             auto makeRecord = [](VM& vm, JsValue targetVal) -> JsValue {
                 Node* target = unwrapNode(targetVal);
@@ -3139,7 +3174,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                 observed->push_back(targetVal);
                 auto* records = newArrayWithPrototype(vm);
                 records->arrayPush(makeRecord(vm, targetVal));
-                try { vm.call(callback, JsValue::undefined(), { JsValue::object(records), thisVal }); } catch (...) {}
+                try { vm.call(callback, thisVal, { JsValue::object(records), thisVal }); } catch (...) {}
                 return JsValue::undefined();
             });
             addNative(vm, obs, "unobserve", [observed](VM&, JsValue, std::vector<JsValue> args) -> JsValue {
@@ -3181,11 +3216,16 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                 size->setProp("blockSize", JsValue::number(rect.height));
                 auto* sizes = newArrayWithPrototype(vm);
                 sizes->arrayPush(JsValue::object(size));
+                auto* borderSizes = newArrayWithPrototype(vm);
+                borderSizes->arrayPush(JsValue::object(size));
+                auto* devicePixelSizes = newArrayWithPrototype(vm);
+                devicePixelSizes->arrayPush(JsValue::object(size));
                 auto* record = vm.gc().newObject(ObjKind::Plain);
                 record->setProp("target", targetVal);
                 record->setProp("contentRect", JsValue::object(contentRect));
                 record->setProp("contentBoxSize", JsValue::object(sizes));
-                record->setProp("borderBoxSize", JsValue::object(sizes));
+                record->setProp("borderBoxSize", JsValue::object(borderSizes));
+                record->setProp("devicePixelContentBoxSize", JsValue::object(devicePixelSizes));
                 return JsValue::object(record);
             };
             addNative(vm, obs, "observe", [observed, makeRecord](VM& vm, JsValue thisVal, std::vector<JsValue> args) -> JsValue {
@@ -3199,7 +3239,7 @@ void registerDom(VM& vm, std::shared_ptr<Node> docNode,
                 observed->push_back(targetVal);
                 auto* records = newArrayWithPrototype(vm);
                 records->arrayPush(makeRecord(vm, targetVal));
-                try { vm.call(callback, JsValue::undefined(), { JsValue::object(records), thisVal }); } catch (...) {}
+                try { vm.call(callback, thisVal, { JsValue::object(records), thisVal }); } catch (...) {}
                 return JsValue::undefined();
             });
             addNative(vm, obs, "unobserve", [observed](VM&, JsValue, std::vector<JsValue> args) -> JsValue {

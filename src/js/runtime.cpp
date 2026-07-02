@@ -9,6 +9,7 @@
 #include <regex>
 #include <cstdio>
 #include <memory>
+#include <unordered_map>
 
 // â”€â”€ Helper macros â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -23,6 +24,8 @@ static JsValue addNative(VM& vm, JsObject* obj, const std::string& name, NativeF
     obj->setProp(name, JsValue::object(fnObj));
     return JsValue::object(fnObj);
 }
+
+static std::unordered_map<std::string, std::string> g_symbolRegistry;
 
 // â”€â”€ Object.prototype methods â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -1214,11 +1217,51 @@ static void registerGlobals(VM& vm) {
     vm.setGlobal("encodeURI", vm.getGlobal("encodeURIComponent"));
     vm.setGlobal("decodeURI", vm.getGlobal("decodeURIComponent"));
 
-    // Symbol: very simplified (just returns a unique string)
+    // Symbol: represented as unique string atoms for now, with registry helpers
+    // so common platform/library probes behave like the web surface.
     static int symbolCounter = 0;
-    vm.setGlobal("Symbol", JsValue::object(vm.gc().newNativeFunction(NATIVE("Symbol") {
-        return vm.str("Symbol(" + (args.empty() ? "" : ARG_STR(0)) + ")_" + std::to_string(++symbolCounter));
-    }, "Symbol")));
+    auto symbolDescription = [](const std::string& raw) -> std::string {
+        const std::string prefix = "Symbol(";
+        if (raw.rfind(prefix, 0) != 0) return "";
+        size_t close = raw.find(')', prefix.size());
+        if (close == std::string::npos) return "";
+        return raw.substr(prefix.size(), close - prefix.size());
+    };
+    auto symbolDisplay = [symbolDescription](const std::string& raw) -> std::string {
+        return "Symbol(" + symbolDescription(raw) + ")";
+    };
+    auto* symbolCtor = vm.gc().newNativeFunction([&](VM& v, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string desc = args.empty() || args[0].isUndefined() ? "" : args[0].toString();
+        return v.str("Symbol(" + desc + ")_" + std::to_string(++symbolCounter));
+    }, "Symbol");
+    addNative(vm, symbolCtor, "for", [](VM& v, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string key = args.empty() ? "" : args[0].toString();
+        auto it = g_symbolRegistry.find(key);
+        if (it == g_symbolRegistry.end())
+            it = g_symbolRegistry.emplace(key, "Symbol(" + key + ")_registry").first;
+        return v.str(it->second);
+    });
+    addNative(vm, symbolCtor, "keyFor", [](VM& v, JsValue, std::vector<JsValue> args) -> JsValue {
+        std::string raw = args.empty() ? "" : args[0].toString();
+        for (const auto& [key, value] : g_symbolRegistry)
+            if (value == raw) return v.str(key);
+        const std::string prefix = "Symbol(";
+        const std::string suffix = ")_registry";
+        if (raw.rfind(prefix, 0) == 0 && raw.size() >= prefix.size() + suffix.size()
+            && raw.compare(raw.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return v.str(raw.substr(prefix.size(), raw.size() - prefix.size() - suffix.size()));
+        }
+        return JsValue::undefined();
+    });
+    addNative(vm, symbolCtor, "description", [symbolDescription](VM& v, JsValue, std::vector<JsValue> args) -> JsValue {
+        if (args.empty()) return JsValue::undefined();
+        return v.str(symbolDescription(args[0].toString()));
+    });
+    addNative(vm, symbolCtor, "toString", [symbolDisplay](VM& v, JsValue, std::vector<JsValue> args) -> JsValue {
+        if (args.empty()) return v.str("Symbol()");
+        return v.str(symbolDisplay(args[0].toString()));
+    });
+    vm.setGlobal("Symbol", JsValue::object(symbolCtor));
 
     // Error constructors
     auto makeErrCtor = [&](const char* name) {
